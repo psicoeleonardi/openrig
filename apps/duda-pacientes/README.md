@@ -6,12 +6,29 @@ Aplicativo para organizar o consultório de psicologia: pacientes, responsáveis
 
 ## Como usar
 
-1. Baixe o arquivo `index.html` e salve numa pasta fixa do computador (ex.: `Documentos/Consultorio/`).
-2. Dê dois cliques nele para abrir no navegador. Se quiser, adicione aos favoritos.
-3. Na primeira vez, crie uma **senha**. Ela protege os dados com criptografia.
-4. Em **Configurações**, preencha nome, CRP, CPF, cidade e valor padrão da sessão. Esses dados aparecem nos recibos e documentos.
+### No iPad, celular ou qualquer aparelho (recomendado)
 
-> **Importante:** os dados ficam guardados **só naquele navegador, naquele computador**. Abra sempre o mesmo arquivo, no mesmo navegador. Faça **backups** com frequência (Configurações → *Baixar backup criptografado*) e guarde-os num pendrive ou na nuvem. **Não há como recuperar a senha.** Se ela for esquecida, os dados não abrem mais.
+Abra a página publicada no claude.ai (o link fica na conversa com o Claude) pelo Safari ou pelo Chrome, entrando com a mesma conta do claude.ai. Nessa versão:
+
+- os dados sincronizam entre os aparelhos: o que for lançado no iPad aparece no computador;
+- tudo é criptografado **no aparelho**, antes de ser enviado. Na conta fica só texto cifrado, numa área privada que ninguém mais acessa;
+- recibos, prontuário, estudo de caso e plano de tratamento são baixados como arquivo. Depois é só abrir o arquivo e usar Compartilhar → Imprimir (ou salvar em PDF).
+
+Dica: no iPad, use Compartilhar → "Adicionar à Tela de Início" para abrir como se fosse um aplicativo.
+
+### No computador, sem internet
+
+1. Baixe o arquivo `index.html` e salve numa pasta fixa (ex.: `Documentos/Consultorio/`).
+2. Dê dois cliques para abrir no navegador (Chrome, Edge, Firefox ou Safari).
+3. Nesse modo os dados ficam **só naquele navegador**. Para passar para a página online, faça um backup e use "Restaurar backup".
+
+> O iPad não roda o arquivo `index.html` aberto pelo app Arquivos: ele só mostra uma prévia, sem funcionar. No iPad, use a página publicada.
+
+### Primeiro acesso
+
+1. Crie uma **senha**. Ela protege os dados com criptografia. **Não há como recuperá-la**: se ela for esquecida, os dados não abrem mais.
+2. Em **Configurações**, preencha nome, CRP, CPF, cidade e valor padrão da sessão. Esses dados aparecem nos recibos e documentos.
+3. Faça **backups** de vez em quando (Configurações → *Baixar backup criptografado*).
 
 ## O que tem
 
@@ -35,7 +52,7 @@ A NFS-e é emitida no sistema da prefeitura ou no **Emissor Nacional** (https://
 
 ## Segurança e sigilo
 
-- Os dados ficam criptografados no navegador (AES-GCM de 256 bits, chave derivada da senha com PBKDF2). Nada é enviado para a internet.
+- Os dados são criptografados no aparelho (AES-GCM de 256 bits, chave derivada da senha com PBKDF2). No modo arquivo, nada sai do computador. Na página publicada, só o conteúdo já criptografado é guardado na área privada da conta.
 - Bloqueio automático após 15 minutos sem uso, além do botão **Bloquear**.
 - O backup criptografado só abre com a senha. A exportação "dados abertos" não tem criptografia: use apenas se precisar e guarde em local seguro.
 - Os documentos impressos levam a nota de sigilo. A Resolução CFP nº 01/2009 pede que o registro documental seja guardado por no mínimo 5 anos.

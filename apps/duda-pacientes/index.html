@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Consultório — Pacientes</title>
+<title>Consultório da Duda</title>
 <style>
 :root {
   --bg: #f6f5f2; --surface: #ffffff; --surface-2: #f0eee9; --text: #23211d; --muted: #6d6961;
@@ -18,10 +18,11 @@
     --line: #37342f; --accent: #8c9bf5; --accent-ink: #14151f; --accent-soft: #2b2f4a;
     --ok: #5fcf98; --ok-soft: #1c3329; --warn: #f0b457; --warn-soft: #3a2d17;
     --bad: #f07b7b; --bad-soft: #3d2020; --info: #7fb3ea; --info-soft: #1d2c3d;
-    --shadow: none;
+    --shadow: none; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #171716; --surface: #211f1e; --surface-2: #2a2826; --text: #ece9e4; --muted: #a09b93;
   --line: #37342f; --accent: #8c9bf5; --accent-ink: #14151f; --accent-soft: #2b2f4a;
   --ok: #5fcf98; --ok-soft: #1c3329; --warn: #f0b457; --warn-soft: #3a2d17;
@@ -42,7 +43,7 @@ h3 { font-size: .95rem; margin: 0 0 .5rem; }
 .pre { white-space: pre-wrap; }
 
 /* layout */
-.top { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 16px; }
 .brand { font-weight: 700; white-space: nowrap; padding: 12px 0; }
 .nav { display: flex; gap: 2px; overflow-x: auto; flex: 1; scrollbar-width: none; }
 .nav a { padding: 14px 10px; color: var(--muted); white-space: nowrap; border-bottom: 2px solid transparent; }
@@ -66,6 +67,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.07); }
 .btn.danger { color: var(--bad); }
+.btn.dangerfill { background: var(--bad); color: var(--bg); border-color: var(--bad); font-weight: 600; }
+.sync { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+.sync.bad { color: var(--bad); }
 .btn.sm { padding: 3px 8px; font-size: .85rem; }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn:disabled { opacity: .5; cursor: default; }
@@ -149,6 +153,7 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
   main { padding-top: 14px; }
   dl.kv { grid-template-columns: 1fr; }
   dl.kv dd { margin-bottom: 6px; }
+  .sync { display: none; }
   th, td { padding: 6px 5px; font-size: .9rem; }
   .card { padding: 12px; }
 }
@@ -178,11 +183,13 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
       <a href="#/contatos" data-page="contatos">Contatos</a>
       <a href="#/config" data-page="config">Configurações</a>
     </nav>
+    <span class="sync" id="sync"></span>
     <button class="btn sm" data-act="lock" title="Bloquear (os dados ficam criptografados)">Bloquear</button>
   </header>
   <main id="main"></main>
 </div>
 <dialog id="dlg"></dialog>
+<dialog id="dlg2"></dialog>
 <div id="print"></div>
 <div id="toast"></div>
 <input type="file" id="fileIn" accept=".json,application/json" hidden>
@@ -239,11 +246,40 @@ function age(n) {
 }
 const isMinor = p => { const a = age(p.nasc); return a !== null && a < 18; };
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2200); }
-function download(name, text) {
+async function download(name, text, type = 'application/json') {
+  if (dlCap) {
+    try { await dlCap.save({ filename: name, data: text }); return true; }
+    catch (e) { if (e?.code !== 'declined') notice('Não foi possível baixar o arquivo.', 'Tente de novo em alguns segundos.'); return false; }
+  }
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  return true;
 }
+
+/* caixas de confirmação dentro da página (o visualizador do claude.ai não mostra alert/confirm/prompt) */
+function ask(o) {
+  return new Promise(res => {
+    const d = $('#dlg2');
+    d.innerHTML = `<form class="dlg"><h2>${esc(o.title)}</h2>${o.text ? `<p class="pre">${esc(o.text)}</p>` : ''}
+      ${o.typeWord ? `<label class="fld"><span>Para confirmar, digite ${esc(o.typeWord)}</span><input name="w" autocomplete="off" autocapitalize="characters"></label>` : ''}
+      ${o.input ? `<label class="fld"><span>${esc(o.input.label)}</span><input name="v" type="${o.input.type || 'text'}" autocomplete="off"></label>` : ''}
+      <div class="err"></div>
+      <div class="foot">${o.alertOnly ? '' : `<button type="button" class="btn" data-x>${esc(o.cancel || 'Cancelar')}</button>`}<button class="btn ${o.danger ? 'dangerfill' : 'primary'}">${esc(o.ok || 'OK')}</button></div></form>`;
+    const f = $('form', d); let done = false;
+    const fin = v => { if (done) return; done = true; d.close(); res(v); };
+    $('[data-x]', f)?.addEventListener('click', () => fin(o.input ? null : false));
+    d.oncancel = e => { e.preventDefault(); fin(o.input ? null : false); };
+    f.onsubmit = e => {
+      e.preventDefault();
+      if (o.typeWord && f.w.value.trim().toUpperCase() !== o.typeWord) { $('.err', f).textContent = 'O texto digitado não confere.'; return; }
+      fin(o.input ? f.v.value : true);
+    };
+    d.showModal();
+    ($('input', f) || $('button.primary, button.dangerfill', f))?.focus();
+  });
+}
+const notice = (title, text = '') => ask({ title, text, ok: 'OK', alertOnly: true });
 function waLink(phone) { const d = digits(phone); if (d.length < 10) return ''; return `https://wa.me/${d.length <= 11 ? '55' + d : d}`; }
 
 /* valor por extenso (recibos) */
@@ -364,11 +400,87 @@ async function openVault(vault, pw) {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(vault.iv) }, k, b64d(vault.ct));
   return { data: JSON.parse(dec.decode(pt)), key: k, salt: s };
 }
+/* Armazenamento: cópia local (localStorage) + sincronização na conta do claude.ai (capability db),
+   numa área privada de cada usuário. Só o texto criptografado sai do aparelho. */
+let cloud = null, cloudUid = null, dlCap = null, lastVault = null, lastSavedAt = 0;
+let pendingVault = null, cloudTimer = null, cloudBusy = false;
+const CHUNK = 180000;
+const capsReady = (async () => {
+  if (!window.claude?.use) return;
+  try {
+    const [d, u, dl] = await Promise.all([claude.use('db'), claude.use('user'), claude.use('downloads')]);
+    dlCap = dl;
+    const id = u ? await u.id() : null;
+    if (d && id) { cloud = d; cloudUid = id; }
+  } catch {}
+})();
+const cbase = () => `data/users/${cloudUid}`;
+function localVault() { try { return JSON.parse(localStorage.getItem(STORE) || 'null'); } catch { return null; } }
+async function cloudLoad() {
+  const m = await cloud.doc(cbase() + '/vault').get();
+  if (!m.exists) return null;
+  const meta = m.data(); let ct = '';
+  for (let i = 0; i < meta.n; i++) {
+    const c = await cloud.doc(`${cbase()}/c-${meta.ver}-${i}`).get();
+    if (!c.exists) throw new Error('parte do cofre ausente');
+    ct += c.data().d;
+  }
+  return { app: 'duda-pacientes', v: 1, salt: meta.salt, iv: meta.iv, ct, savedAt: meta.savedAt };
+}
+async function cloudSave(v) {
+  const ver = Date.now().toString(36) + Math.random().toString(36).slice(2, 6), n = Math.max(1, Math.ceil(v.ct.length / CHUNK));
+  for (let i = 0; i < n; i++) await cloud.doc(`${cbase()}/c-${ver}-${i}`).set({ d: v.ct.slice(i * CHUNK, (i + 1) * CHUNK) });
+  const old = (await cloud.doc(cbase() + '/vault').get()).data?.();
+  await cloud.doc(cbase() + '/vault').set({ salt: v.salt, iv: v.iv, n, ver, savedAt: v.savedAt });
+  if (old?.ver && old.ver !== ver) for (let i = 0; i < old.n; i++) { try { await cloud.doc(`${cbase()}/c-${old.ver}-${i}`).delete(); } catch {} }
+}
+async function cloudWipe() {
+  const all = await cloud.collection(cbase()).get();
+  for (const d of all.docs) { try { await cloud.doc(`${cbase()}/${d.id}`).delete(); } catch {} }
+}
+function setSync(state) {
+  const el = $('#sync'); if (!el) return;
+  el.textContent = { local: 'salvo só neste aparelho', saving: 'sincronizando…', ok: '☁︎ sincronizado', err: '⚠ sem sincronizar' }[state];
+  el.className = 'sync' + (state === 'err' ? ' bad' : '');
+  el.title = state === 'err' ? 'Os dados estão salvos neste aparelho e serão enviados assim que a conexão voltar.' : '';
+}
+function scheduleCloud() {
+  setSync('saving');
+  clearTimeout(cloudTimer); cloudTimer = setTimeout(flushCloud, 1200);
+}
+async function flushCloud() {
+  if (cloudBusy) { cloudTimer = setTimeout(flushCloud, 800); return; }
+  const v = pendingVault; if (!v) return;
+  cloudBusy = true; pendingVault = null;
+  try { await cloudSave(v); setSync(pendingVault ? 'saving' : 'ok'); }
+  catch { if (!pendingVault) pendingVault = v; setSync('err'); cloudTimer = setTimeout(flushCloud, 15000); }
+  finally { cloudBusy = false; }
+}
 async function persist() {
   const vault = await sealVault(db, key, salt);
-  try { localStorage.setItem(STORE, JSON.stringify(vault)); }
-  catch (e) { alert('Não foi possível salvar: o armazenamento do navegador está cheio ou bloqueado. Faça um backup agora em Configurações.'); throw e; }
+  vault.savedAt = Date.now();
+  lastVault = vault; lastSavedAt = vault.savedAt;
+  let localOk = true;
+  try { localStorage.setItem(STORE, JSON.stringify(vault)); } catch { localOk = false; }
+  if (cloud) { pendingVault = vault; scheduleCloud(); }
+  else if (!localOk) notice('Não foi possível salvar', 'O armazenamento do navegador está cheio ou bloqueado. Faça um backup agora em Configurações.');
+  else setSync('local');
 }
+/* ao voltar para a aba, busca alterações feitas em outro aparelho */
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !cloud || !db || pendingVault || cloudBusy || $('#dlg').open) return;
+  try {
+    const m = await cloud.doc(cbase() + '/vault').get();
+    if (!m.exists || !(m.data().savedAt > lastSavedAt)) return;
+    const v = await cloudLoad();
+    try {
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(v.iv) }, key, b64d(v.ct));
+      db = migrate(JSON.parse(dec.decode(pt))); lastVault = v; lastSavedAt = v.savedAt;
+      try { localStorage.setItem(STORE, JSON.stringify(v)); } catch {}
+      render(); toast('Atualizado com as alterações de outro aparelho.');
+    } catch { showLock('A senha foi alterada em outro aparelho.'); }
+  } catch {}
+});
 async function commit(msg) {
   db.atualizadoEm = new Date().toISOString();
   await persist();
@@ -377,7 +489,8 @@ async function commit(msg) {
 }
 
 /* ---------- tela de bloqueio ---------- */
-function showLock(reason) {
+let unlockVault = null, unlockIsCloud = false;
+async function showLock(reason) {
   db = null; key = null; salt = null;
   const dlg = $('#dlg'); if (dlg.open) dlg.close();
   $('#main').innerHTML = '';
@@ -387,10 +500,18 @@ function showLock(reason) {
     L.innerHTML = `<div class="card"><h2>Navegador sem suporte</h2><p>Este navegador não oferece criptografia (Web Crypto). Abra o arquivo no Chrome, Edge, Firefox ou Safari atualizados.</p></div>`;
     return;
   }
-  const has = !!localStorage.getItem(STORE);
+  L.innerHTML = '<div class="card"><p>Carregando…</p></div>';
+  await capsReady;
+  let cv = null, cloudErr = false;
+  if (cloud) { try { cv = await cloudLoad(); } catch { cloudErr = true; } }
+  const lv = localVault();
+  unlockIsCloud = !!cv && (!lv || (cv.savedAt || 0) >= (lv.savedAt || 0));
+  unlockVault = unlockIsCloud ? cv : lv;
+  const has = !!unlockVault;
+  if (cloudErr && !has) { L.innerHTML = `<div class="card"><h2>Sem conexão</h2><p>Não foi possível buscar os dados na sua conta. Verifique a internet e recarregue a página.</p></div>`; return; }
   L.innerHTML = has ? `
     <form class="card" id="unlockForm">
-      <h2>Consultório — Pacientes</h2>
+      <h2>Consultório</h2>
       <p>${reason ? esc(reason) + ' ' : ''}Digite sua senha para abrir os dados.</p>
       <label class="fld"><span>Senha</span><input type="password" name="pw" autocomplete="current-password" required autofocus></label>
       <div class="err" id="lockErr"></div>
@@ -398,7 +519,7 @@ function showLock(reason) {
     </form>` : `
     <form class="card" id="setupForm">
       <h2>Bem-vinda! Vamos começar</h2>
-      <p>Crie uma senha para proteger os dados dos pacientes. Tudo fica guardado <b>somente neste computador</b>, criptografado com essa senha.</p>
+      <p>Crie uma senha para proteger os dados dos pacientes. Tudo é criptografado com essa senha antes de ser salvo${cloud ? ' e fica disponível só para você, em qualquer aparelho onde abrir esta página com a sua conta' : ', <b>somente neste aparelho</b>'}.</p>
       <p><b>Atenção:</b> não há como recuperar a senha. Se esquecê-la, os dados não poderão ser abertos. Guarde-a em lugar seguro e faça backups em Configurações.</p>
       <div class="grid">
         <label class="fld full"><span>Nova senha (mín. 6 caracteres)</span><input type="password" name="pw1" minlength="6" autocomplete="new-password" required autofocus></label>
@@ -417,8 +538,10 @@ document.addEventListener('submit', async e => {
     e.preventDefault();
     const btn = $('button', f); btn.disabled = true; $('#lockErr').textContent = '';
     try {
-      const r = await openVault(JSON.parse(localStorage.getItem(STORE)), f.pw.value);
-      db = migrate(r.data); key = r.key; salt = r.salt; start();
+      const r = await openVault(unlockVault, f.pw.value);
+      db = migrate(r.data); key = r.key; salt = r.salt; lastVault = unlockVault; lastSavedAt = unlockVault.savedAt || 0;
+      start();
+      if (cloud && !unlockIsCloud) await persist(); // envia para a conta o que só existia neste aparelho
     } catch { $('#lockErr').textContent = 'Senha incorreta.'; btn.disabled = false; f.pw.select(); }
   } else if (f.id === 'setupForm') {
     e.preventDefault();
@@ -426,8 +549,8 @@ document.addEventListener('submit', async e => {
     salt = crypto.getRandomValues(new Uint8Array(16));
     key = await deriveKey(f.pw1.value, salt);
     db = migrate(pendingImport || emptyDB()); pendingImport = null;
-    await persist(); start();
-    location.hash = db.settings.nome ? '#/inicio' : '#/config';
+    curRoute = db.settings.nome ? 'inicio' : 'config';
+    start(); await persist();
     toast(db.patients.length ? 'Backup restaurado.' : 'Tudo pronto! Preencha seus dados profissionais.');
   } else if (f.dataset.submit) {
     e.preventDefault();
@@ -440,6 +563,7 @@ function start() {
   $('#app').hidden = false;
   lastActive = Date.now();
   render();
+  setSync(cloud ? 'ok' : 'local');
 }
 let lastActive = Date.now();
 ['click', 'keydown', 'mousemove', 'touchstart'].forEach(ev => document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true }));
@@ -491,13 +615,23 @@ function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 
 }
 function pickPatient(title, cb, filter = p => p.status !== 'inativo') {
   const list = db.patients.filter(filter).sort((a, b) => a.nome.localeCompare(b.nome));
-  if (!list.length) { alert('Cadastre um paciente primeiro.'); return; }
+  if (!list.length) { notice('Cadastre um paciente primeiro.'); return; }
   openForm({ title, saveLabel: 'Continuar', fields: [{ k: 'pid', l: 'Paciente', t: 'select', req: true, empty: true, opts: list.map(p => [p.id, p.nome]) }],
     onSave: v => { if (!v.pid) return false; setTimeout(() => cb(v.pid), 0); } });
 }
 
 /* ---------- impressão ---------- */
-function printDoc(html) {
+const DOC_CSS = `body{font:12pt/1.5 Georgia,serif;color:#000;background:#fff;max-width:760px;margin:24px auto;padding:0 16px}h1{font-size:16pt}h2{font-size:13pt;margin-top:18pt}
+.pentry{margin-bottom:10pt;page-break-inside:avoid}.pre{white-space:pre-wrap}.sign{margin-top:48pt;text-align:center}.sign div{border-top:1px solid #000;width:60%;margin:0 auto;padding-top:4pt}
+table{border-collapse:collapse}td,th{border:1px solid #999;padding:4pt 6pt;text-align:left;vertical-align:top}.foot{margin-top:24pt;font-size:9pt;color:#555}`;
+const docLabel = () => dlCap ? 'Baixar para imprimir' : 'Imprimir / PDF';
+async function printDoc(html, name = 'documento') {
+  if (dlCap) {
+    const file = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(name)}</title><style>${DOC_CSS}</style></head><body>${html}</body></html>`;
+    const slug = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (await download(`${slug || 'documento'}.html`, file, 'text/html')) toast('Arquivo baixado. Abra-o e use Compartilhar → Imprimir.');
+    return;
+  }
   $('#print').innerHTML = html;
   document.body.classList.add('printing');
   setTimeout(() => { window.print(); document.body.classList.remove('printing'); }, 50);
@@ -519,6 +653,8 @@ function patientIdHTML(p) {
 /* ---------- ações ---------- */
 const actions = {};
 document.addEventListener('click', async e => {
+  const link = e.target.closest('a[href^="#/"]');
+  if (link) { e.preventDefault(); go(link.getAttribute('href').slice(2)); return; }
   const b = e.target.closest('[data-act]');
   if (!b) {
     if (!e.target.closest('details.menu')) $$('details.menu[open]').forEach(d => d.open = false);
@@ -582,17 +718,17 @@ actions['new-patient'] = () => openForm({
   onSave: async v => {
     const p = { id: uid(), ...v, responsaveis: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
     db.patients.push(p);
-    location.hash = `#/p/${p.id}/dados`;
+    curRoute = `p/${p.id}/dados`;
     await commit(isMinor(p) ? 'Paciente cadastrado. Agora adicione os responsáveis.' : 'Paciente cadastrado.');
   },
 });
 actions['edit-patient'] = ({ id }) => { const p = P(id); openForm({ title: 'Editar paciente', fields: patientFields(), values: p, onSave: async v => { Object.assign(p, v); await commit('Dados atualizados.'); } }); };
 actions['del-patient'] = async ({ id }) => {
   const p = P(id);
-  if (prompt(`Excluir ${p.nome} e TODOS os registros (atendimentos, pagamentos, notas, prontuário)? Esta ação não pode ser desfeita.\n\nPara confirmar, digite EXCLUIR:`) !== 'EXCLUIR') return;
+  if (!(await ask({ title: `Excluir ${p.nome}?`, text: 'Todos os registros serão apagados: atendimentos, pagamentos, notas, contatos e prontuário. Não dá para desfazer.', ok: 'Excluir paciente', danger: true, typeWord: 'EXCLUIR' }))) return;
   db.patients = db.patients.filter(x => x.id !== id);
   for (const k of ['sessions', 'payments', 'invoices', 'contacts', 'records']) db[k] = db[k].filter(x => x.pacienteId !== id);
-  location.hash = '#/pacientes';
+  curRoute = 'pacientes';
   await commit('Paciente excluído.');
 };
 
@@ -611,7 +747,7 @@ const guardianFields = () => [
 function fixFinanceiro(p, r) { if (r.financeiro) p.responsaveis.forEach(x => { if (x !== r) x.financeiro = false; }); }
 actions['new-guardian'] = ({ pid }) => { const p = P(pid); openForm({ title: 'Novo responsável', fields: guardianFields(), values: { financeiro: !p.responsaveis.length, guarda: true }, onSave: async v => { const r = { id: uid(), ...v }; p.responsaveis.push(r); fixFinanceiro(p, r); await commit('Responsável adicionado.'); } }); };
 actions['edit-guardian'] = ({ pid, id }) => { const p = P(pid), r = p.responsaveis.find(x => x.id === id); openForm({ title: 'Editar responsável', fields: guardianFields(), values: r, onSave: async v => { Object.assign(r, v); fixFinanceiro(p, r); await commit('Responsável atualizado.'); } }); };
-actions['del-guardian'] = async ({ pid, id }) => { const p = P(pid); if (!confirm('Remover este responsável?')) return; p.responsaveis = p.responsaveis.filter(x => x.id !== id); await commit(); };
+actions['del-guardian'] = async ({ pid, id }) => { const p = P(pid); if (!(await ask({ title: 'Remover este responsável?', ok: 'Remover', danger: true }))) return; p.responsaveis = p.responsaveis.filter(x => x.id !== id); await commit(); };
 
 /* atendimentos */
 function sessionFields(isNew) {
@@ -642,7 +778,7 @@ function newSession(pid, preset = {}) {
 actions['new-session'] = ({ pid }) => pid ? newSession(pid) : pickPatient('Agendar sessão', newSession);
 const S = id => db.sessions.find(s => s.id === id);
 actions['edit-session'] = ({ id }) => { const s = S(id); openForm({ title: `Editar sessão — ${P(s.pacienteId).nome}`, fields: sessionFields(false), values: s, onSave: async v => { Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
-actions['del-session'] = async ({ id }) => { if (!confirm('Excluir este atendimento? (Para faltas e cancelamentos, prefira mudar a situação e manter o histórico.)')) return; db.sessions = db.sessions.filter(s => s.id !== id); await commit('Sessão excluída.'); };
+actions['del-session'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este atendimento?', text: 'Para faltas e cancelamentos, prefira mudar a situação e manter o histórico.', ok: 'Excluir', danger: true }))) return; db.sessions = db.sessions.filter(s => s.id !== id); await commit('Sessão excluída.'); };
 actions['sess-done'] = async ({ id }) => { S(id).status = 'realizado'; await commit('Marcada como realizada.'); };
 actions['sess-miss'] = ({ id }) => {
   const s = S(id), p = P(s.pacienteId);
@@ -699,13 +835,13 @@ function newPayment(pid) {
   openForm({ title: `Pagamento — ${p.nome}`, fields: paymentFields(),
     values: { data: today(), forma: 'Pix', pagador: pay.nome, pagadorCpf: pay.cpf, ...sug },
     intro: sug.valor ? `<div class="alert info">Saldo em aberto: <b>${money(sug.valor)}</b>. Valor e referência foram sugeridos.</div>` : '',
-    onSave: async v => { if (!v.valor) { alert('Informe o valor.'); return false; } db.payments.push({ id: uid(), pacienteId: pid, ...v }); await commit('Pagamento registrado.'); } });
+    onSave: async v => { if (!v.valor) { notice('Informe o valor.'); return false; } db.payments.push({ id: uid(), pacienteId: pid, ...v }); await commit('Pagamento registrado.'); } });
 }
 actions['new-payment'] = ({ pid }) => pid ? newPayment(pid) : pickPatient('Registrar pagamento', newPayment);
 const PAY = id => db.payments.find(x => x.id === id);
 actions['edit-payment'] = ({ id }) => { const x = PAY(id); openForm({ title: 'Editar pagamento', fields: paymentFields(), values: x, onSave: async v => { Object.assign(x, v); await commit('Pagamento atualizado.'); } }); };
 actions['del-payment'] = async ({ id }) => {
-  if (!confirm('Excluir este pagamento?')) return;
+  if (!(await ask({ title: 'Excluir este pagamento?', ok: 'Excluir', danger: true }))) return;
   db.payments = db.payments.filter(x => x.id !== id);
   db.invoices.forEach(i => { i.pagamentos = (i.pagamentos || []).filter(x => x !== id); });
   await commit('Pagamento excluído.');
@@ -716,7 +852,7 @@ actions.receipt = ({ id }) => {
   printDoc(`${profHeader()}<h1 style="text-align:center">RECIBO</h1><p style="text-align:right"><b>${money(x.valor)}</b></p>
     <p>Recebi de <b>${esc(x.pagador || p.nome)}</b>${x.pagadorCpf ? `, CPF ${esc(x.pagadorCpf)}` : ''}, a importância de <b>${money(x.valor)}</b> (${esc(extenso(x.valor))})${benef}${x.referencia ? ` — ${esc(x.referencia)}` : ''}, pago via ${esc(x.forma || '—')} em ${fmtD(x.data)}.</p>
     <p>Para clareza, firmo o presente.</p><p>${esc(s.cidade || '')}${s.cidade ? ', ' : ''}${fmtD(today())}.</p>
-    <div class="sign"><div>${esc(s.nome || '')}<br>Psicóloga${s.crp ? ' — CRP ' + esc(s.crp) : ''}${s.cpf ? '<br>CPF ' + esc(s.cpf) : ''}</div></div>`);
+    <div class="sign"><div>${esc(s.nome || '')}<br>Psicóloga${s.crp ? ' — CRP ' + esc(s.crp) : ''}${s.cpf ? '<br>CPF ' + esc(s.cpf) : ''}</div></div>`, `Recibo ${p.nome} ${x.data}`);
 };
 
 /* notas fiscais */
@@ -752,13 +888,13 @@ function newInvoice(pid, payId) {
 actions['new-invoice'] = ({ pid, pay }) => pid ? newInvoice(pid, pay) : pickPatient('Nova nota fiscal', id => newInvoice(id), () => true);
 const INV = id => db.invoices.find(x => x.id === id);
 actions['edit-invoice'] = ({ id }) => { const inv = INV(id), p = P(inv.pacienteId); openForm({ title: 'Editar nota fiscal', fields: invoiceFields(p, inv), values: inv, onSave: async v => { saveInvoice(p, inv, v); await commit('Nota atualizada.'); } }); };
-actions['del-invoice'] = async ({ id }) => { if (!confirm('Excluir o registro desta nota? (Se ela foi emitida, prefira marcar como “cancelada”.)')) return; db.invoices = db.invoices.filter(x => x.id !== id); await commit(); };
+actions['del-invoice'] = async ({ id }) => { if (!(await ask({ title: 'Excluir o registro desta nota?', text: 'Se ela já foi emitida, prefira editar e marcar como “cancelada”.', ok: 'Excluir', danger: true }))) return; db.invoices = db.invoices.filter(x => x.id !== id); await commit(); };
 actions['copy-invoice'] = async ({ id }) => {
   const i = INV(id);
   const txt = [`Tomador: ${i.tomadorNome}`, i.tomadorCpf && `CPF/CNPJ: ${i.tomadorCpf}`, i.tomadorEmail && `E-mail: ${i.tomadorEmail}`, i.tomadorEndereco && `Endereço: ${i.tomadorEndereco}`,
     `Valor: ${money(i.valor)}`, i.competencia && `Competência: ${fmtMonth(i.competencia)}`, i.codigo && `Código do serviço: ${i.codigo}`, `Descrição: ${i.descricao || ''}`].filter(Boolean).join('\n');
   try { await navigator.clipboard.writeText(txt); toast('Dados copiados. Cole no emissor de NFS-e.'); }
-  catch { prompt('Copie os dados abaixo:', txt.replace(/\n/g, ' | ')); }
+  catch { notice('Copie os dados abaixo', txt); }
 };
 actions['mark-issued'] = ({ id }) => {
   const inv = INV(id);
@@ -788,7 +924,7 @@ actions['new-contact'] = ({ pid }) => {
     } });
 };
 actions['edit-contact'] = ({ id }) => { const c = db.contacts.find(x => x.id === id), p = P(c.pacienteId); openForm({ title: 'Editar contato', fields: contactFields(p).filter(f => f.k !== 'noProntuario'), values: c, onSave: async v => { Object.assign(c, v); await commit(); } }); };
-actions['del-contact'] = async ({ id }) => { if (!confirm('Excluir este registro de contato?')) return; db.contacts = db.contacts.filter(x => x.id !== id); await commit(); };
+actions['del-contact'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este registro de contato?', ok: 'Excluir', danger: true }))) return; db.contacts = db.contacts.filter(x => x.id !== id); await commit(); };
 
 /* prontuário */
 function recordFields(p) {
@@ -802,14 +938,14 @@ function recordFields(p) {
 actions['new-record'] = ({ pid, sess }) => {
   const p = P(pid), s = sess ? S(sess) : null;
   openForm({ title: `Prontuário — ${p.nome}`, fields: recordFields(p), values: { data: s?.data || today(), tipo: 'Evolução de sessão', sessaoId: sess || '' },
-    onSave: async v => { if (!v.texto) { alert('Escreva o registro.'); return false; } db.records.push({ id: uid(), pacienteId: pid, ...v, criadoEm: new Date().toISOString() }); if (location.hash !== `#/p/${pid}/prontuario`) location.hash = `#/p/${pid}/prontuario`; await commit('Registro salvo no prontuário.'); } });
+    onSave: async v => { if (!v.texto) { notice('Escreva o registro.'); return false; } db.records.push({ id: uid(), pacienteId: pid, ...v, criadoEm: new Date().toISOString() }); curRoute = `p/${pid}/prontuario`; await commit('Registro salvo no prontuário.'); } });
 };
 actions['edit-record'] = ({ id }) => { const r = db.records.find(x => x.id === id), p = P(r.pacienteId); openForm({ title: 'Editar registro', fields: recordFields(p), values: r, onSave: async v => { Object.assign(r, v, { editadoEm: new Date().toISOString() }); await commit('Registro atualizado.'); } }); };
-actions['del-record'] = async ({ id }) => { if (!confirm('Excluir este registro do prontuário?')) return; db.records = db.records.filter(x => x.id !== id); await commit(); };
+actions['del-record'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este registro do prontuário?', ok: 'Excluir', danger: true }))) return; db.records = db.records.filter(x => x.id !== id); await commit(); };
 actions['print-records'] = ({ pid }) => {
   const p = P(pid), rs = db.records.filter(r => r.pacienteId === pid).sort((a, b) => a.data.localeCompare(b.data));
   printDoc(`${profHeader()}<h1>Prontuário psicológico</h1>${patientIdHTML(p)}<h2>Registros</h2>
-    ${rs.map(r => `<div class="pentry"><b>${fmtD(r.data)} — ${esc(r.tipo)}</b><div class="pre">${esc(r.texto)}</div></div>`).join('') || '<p>Sem registros.</p>'}${confidential()}`);
+    ${rs.map(r => `<div class="pentry"><b>${fmtD(r.data)} — ${esc(r.tipo)}</b><div class="pre">${esc(r.texto)}</div></div>`).join('') || '<p>Sem registros.</p>'}${confidential()}`, `Prontuario ${p.nome}`);
 };
 
 /* estudo de caso & plano */
@@ -823,7 +959,7 @@ async function saveStudy({ pid }, form, silent) {
 actions['save-study'] = saveStudy;
 actions['print-study'] = ({ pid }) => {
   const p = P(pid), e = p.estudo;
-  printDoc(`${profHeader()}<h1>Estudo de caso</h1>${patientIdHTML(p)}${STUDY.filter(([k]) => e[k]).map(([k, l]) => `<h2>${esc(l)}</h2><div class="pre">${esc(e[k])}</div>`).join('')}${confidential()}`);
+  printDoc(`${profHeader()}<h1>Estudo de caso</h1>${patientIdHTML(p)}${STUDY.filter(([k]) => e[k]).map(([k, l]) => `<h2>${esc(l)}</h2><div class="pre">${esc(e[k])}</div>`).join('')}${confidential()}`, `Estudo de caso ${p.nome}`);
 };
 async function savePlan({ pid }, form, silent) {
   const p = P(pid); if (!p || !form) return;
@@ -841,12 +977,12 @@ actions['add-meta'] = async ({ pid }) => {
   $('#newMeta')?.focus();
 };
 actions['meta-status'] = async ({ pid, mid }, el) => { const m = P(pid).plano.metas.find(x => x.id === mid); m.status = el.value; m.atualizadaEm = today(); await savePlan({ pid }, $('#planForm'), true); await commit(); };
-actions['del-meta'] = async ({ pid, mid }) => { if (!confirm('Remover esta meta?')) return; await savePlan({ pid }, $('#planForm'), true); const pl = P(pid).plano; pl.metas = pl.metas.filter(x => x.id !== mid); await commit(); };
+actions['del-meta'] = async ({ pid, mid }) => { if (!(await ask({ title: 'Remover esta meta?', ok: 'Remover', danger: true }))) return; await savePlan({ pid }, $('#planForm'), true); const pl = P(pid).plano; pl.metas = pl.metas.filter(x => x.id !== mid); await commit(); };
 actions['print-plan'] = ({ pid }) => {
   const p = P(pid), pl = p.plano;
   printDoc(`${profHeader()}<h1>Plano de tratamento</h1>${patientIdHTML(p)}
     ${PLAN.filter(f => f.k && pl[f.k]).map(f => `<h2>${esc(f.l)}</h2><div class="pre">${esc(f.t === 'date' ? fmtD(pl[f.k]) : pl[f.k])}</div>`).join('')}
-    ${pl.metas.length ? `<h2>Metas terapêuticas</h2><table><tr><th>Meta</th><th>Situação</th></tr>${pl.metas.map(m => `<tr><td>${esc(m.texto)}</td><td>${META_STATUS[m.status]}</td></tr>`).join('')}</table>` : ''}${confidential()}`);
+    ${pl.metas.length ? `<h2>Metas terapêuticas</h2><table><tr><th>Meta</th><th>Situação</th></tr>${pl.metas.map(m => `<tr><td>${esc(m.texto)}</td><td>${META_STATUS[m.status]}</td></tr>`).join('')}</table>` : ''}${confidential()}`, `Plano de tratamento ${p.nome}`);
 };
 
 /* configurações / backup */
@@ -862,9 +998,9 @@ const SETTINGS_FIELDS = [
   { k: 'linkNF', l: 'Link do emissor de NFS-e (prefeitura ou Emissor Nacional)', t: 'url', w: 'full' },
 ];
 actions['save-settings'] = async (_d, form) => { Object.assign(db.settings, readForm(form, SETTINGS_FIELDS)); await commit('Configurações salvas.'); };
-actions['export-vault'] = async () => { download(`consultorio-backup-${today()}.json`, JSON.stringify(await sealVault(db, key, salt))); toast('Backup criptografado baixado.'); };
-actions['export-json'] = () => {
-  if (!confirm('O arquivo aberto (sem criptografia) contém dados clínicos sigilosos. Guarde-o apenas em local seguro. Continuar?')) return;
+actions['export-vault'] = async () => { if (await download(`consultorio-backup-${today()}.json`, JSON.stringify(await sealVault(db, key, salt)))) toast('Backup criptografado baixado.'); };
+actions['export-json'] = async () => {
+  if (!(await ask({ title: 'Exportar sem criptografia?', text: 'O arquivo terá os dados clínicos abertos, legíveis por qualquer pessoa que o tiver. Guarde-o apenas em local seguro.', ok: 'Exportar' }))) return;
   download(`consultorio-dados-abertos-${today()}.json`, JSON.stringify(db, null, 2));
 };
 function readFile() {
@@ -875,13 +1011,13 @@ function readFile() {
   });
 }
 async function parseBackup(text) {
-  let obj; try { obj = JSON.parse(text); } catch { alert('Arquivo inválido.'); return null; }
+  let obj; try { obj = JSON.parse(text); } catch { notice('Arquivo inválido', 'Escolha um arquivo .json gerado pelo botão de backup.'); return null; }
   if (obj.ct && obj.salt) {
-    const pw = prompt('Este backup é criptografado. Digite a senha usada quando ele foi criado:');
+    const pw = await ask({ title: 'Backup criptografado', text: 'Digite a senha que estava em uso quando este backup foi criado.', input: { label: 'Senha do backup', type: 'password' }, ok: 'Abrir' });
     if (!pw) return null;
-    try { return (await openVault(obj, pw)).data; } catch { alert('Senha incorreta para este backup.'); return null; }
+    try { return (await openVault(obj, pw)).data; } catch { notice('Senha incorreta para este backup.'); return null; }
   }
-  if (!Array.isArray(obj.patients)) { alert('Este arquivo não parece ser um backup do gerenciador.'); return null; }
+  if (!Array.isArray(obj.patients)) { notice('Este arquivo não é um backup deste gerenciador.'); return null; }
   return obj;
 }
 actions['setup-import'] = async () => {
@@ -894,20 +1030,23 @@ actions['setup-import'] = async () => {
 actions.import = async () => {
   const text = await readFile(); if (!text) return;
   const data = await parseBackup(text); if (!data) return;
-  if (!confirm(`Substituir TODOS os dados atuais (${db.patients.length} pacientes) pelo backup (${data.patients.length} pacientes)?`)) return;
+  if (!(await ask({ title: 'Substituir todos os dados?', text: `Os dados atuais (${db.patients.length} pacientes) serão trocados pelos do backup (${data.patients.length} pacientes).`, ok: 'Substituir', danger: true }))) return;
   db = migrate(data); await commit('Backup restaurado.');
 };
 actions['change-pw'] = () => openForm({ title: 'Trocar senha', fields: [
   { k: 'atual', l: 'Senha atual', t: 'password', req: true, w: 'full' }, { k: 'nova', l: 'Nova senha (mín. 6)', t: 'password', req: true }, { k: 'conf', l: 'Repita a nova senha', t: 'password', req: true }],
   onSave: async v => {
-    try { await openVault(JSON.parse(localStorage.getItem(STORE)), v.atual); } catch { alert('Senha atual incorreta.'); return false; }
-    if (v.nova.length < 6 || v.nova !== v.conf) { alert('A nova senha precisa ter 6+ caracteres e as duas precisam ser iguais.'); return false; }
+    try { await openVault(lastVault, v.atual); } catch { notice('Senha atual incorreta.'); return false; }
+    if (v.nova.length < 6 || v.nova !== v.conf) { notice('Confira a nova senha', 'Ela precisa ter pelo menos 6 caracteres, e as duas precisam ser iguais.'); return false; }
     salt = crypto.getRandomValues(new Uint8Array(16)); key = await deriveKey(v.nova, salt);
     await commit('Senha alterada. Backups antigos continuam com a senha antiga.');
   } });
 actions.wipe = async () => {
-  if (prompt('Isto apaga TODOS os dados deste navegador. Faça um backup antes!\n\nPara confirmar, digite APAGAR TUDO:') !== 'APAGAR TUDO') return;
-  localStorage.removeItem(STORE); location.hash = ''; showLock();
+  if (!(await ask({ title: 'Apagar todos os dados?', text: cloud ? 'Apaga os dados deste aparelho e da sua conta (todos os aparelhos). Faça um backup antes.' : 'Apaga todos os dados deste navegador. Faça um backup antes.', ok: 'Apagar tudo', danger: true, typeWord: 'APAGAR TUDO' }))) return;
+  clearTimeout(cloudTimer); pendingVault = null;
+  try { localStorage.removeItem(STORE); } catch {}
+  if (cloud) { try { await cloudWipe(); } catch {} }
+  curRoute = 'inicio'; showLock();
 };
 actions.theme = ({ v }) => { if (v) document.documentElement.dataset.theme = v; else delete document.documentElement.dataset.theme; try { localStorage.setItem('duda.theme', v); } catch {} };
 try { const th = localStorage.getItem('duda.theme'); if (th) document.documentElement.dataset.theme = th; } catch {}
@@ -1105,7 +1244,7 @@ function tPront(p) {
   const rs = db.records.filter(r => r.pacienteId === p.id).sort((a, b) => b.data.localeCompare(a.data) || (b.criadoEm || '').localeCompare(a.criadoEm || ''));
   const pendentes = sessOf(p.id).filter(s => s.status === 'realizado' && !db.records.some(r => r.sessaoId === s.id)).sort(bySess).reverse();
   return `${pendentes.length ? `<div class="alert info">${pendentes.length} sessão(ões) realizada(s) sem evolução no prontuário: ${pendentes.slice(0, 6).map(s => `<a href="#" data-act="new-record" data-pid="${p.id}" data-sess="${s.id}">${fmtD(s.data)}</a>`).join(', ')}${pendentes.length > 6 ? '…' : ''}</div>` : ''}
-    <div class="card"><div class="head" style="margin-bottom:12px"><h2 style="margin:0">Prontuário (${rs.length} registro${rs.length === 1 ? '' : 's'})</h2><div class="actions"><button class="btn sm" data-act="print-records" data-pid="${p.id}">Imprimir / PDF</button><button class="btn sm primary" data-act="new-record" data-pid="${p.id}">+ Registro</button></div></div>
+    <div class="card"><div class="head" style="margin-bottom:12px"><h2 style="margin:0">Prontuário (${rs.length} registro${rs.length === 1 ? '' : 's'})</h2><div class="actions"><button class="btn sm" data-act="print-records" data-pid="${p.id}">${docLabel()}</button><button class="btn sm primary" data-act="new-record" data-pid="${p.id}">+ Registro</button></div></div>
     ${rs.map(r => { const s = r.sessaoId ? S(r.sessaoId) : null; return `<div class="entry"><div class="meta"><div><b>${fmtD(r.data)}</b> · ${esc(r.tipo)}${s ? ` <span class="muted">(sessão ${esc(s.hora || '')})</span>` : ''}${r.editadoEm ? ` <span class="muted">· editado em ${fmtD(r.editadoEm.slice(0, 10))}</span>` : ''}</div>${menu([['edit-record', 'Editar', { id: r.id }], ['del-record', 'Excluir', { id: r.id }, 'danger']])}</div><div class="pre">${esc(r.texto)}</div></div>`; }).join('') || '<div class="empty">Nenhum registro ainda.</div>'}
     <p class="muted" style="margin-bottom:0">Lembrete: a Resolução CFP nº 01/2009 pede a guarda do registro documental por no mínimo 5 anos.</p></div>`;
 }
@@ -1113,14 +1252,14 @@ function tEstudo(p) {
   const e = p.estudo;
   return `<form class="card" data-submit="save-study" data-autosave="save-study" data-pid="${p.id}">
     <div class="head"><div><h2 style="margin:0">Estudo de caso</h2><div class="muted" id="savedAt">${e.atualizadoEm ? 'Última atualização: ' + fmtD(e.atualizadoEm.slice(0, 10)) : 'Salva automaticamente ao sair de cada campo.'}</div></div>
-    <div class="actions"><button type="button" class="btn sm" data-act="print-study" data-pid="${p.id}">Imprimir / PDF</button><button class="btn sm primary">Salvar</button></div></div>
+    <div class="actions"><button type="button" class="btn sm" data-act="print-study" data-pid="${p.id}">${docLabel()}</button><button class="btn sm primary">Salvar</button></div></div>
     <div class="grid">${STUDY.map(([k, l]) => fieldHTML({ k, l, t: 'textarea', rows: 4 }, e[k])).join('')}</div></form>`;
 }
 function tPlano(p) {
   const pl = p.plano;
   return `<form class="card" id="planForm" data-submit="save-plan" data-autosave="save-plan" data-pid="${p.id}">
     <div class="head"><div><h2 style="margin:0">Plano de tratamento</h2><div class="muted" id="savedAt">${pl.atualizadoEm ? 'Última atualização: ' + fmtD(pl.atualizadoEm.slice(0, 10)) : 'Salvo automaticamente ao sair de cada campo.'}</div></div>
-    <div class="actions"><button type="button" class="btn sm" data-act="print-plan" data-pid="${p.id}">Imprimir / PDF</button><button class="btn sm primary">Salvar</button></div></div>
+    <div class="actions"><button type="button" class="btn sm" data-act="print-plan" data-pid="${p.id}">${docLabel()}</button><button class="btn sm primary">Salvar</button></div></div>
     ${pl.revisao && pl.revisao <= today() ? `<div class="alert">A data de revisão do plano (${fmtD(pl.revisao)}) chegou.</div>` : ''}
     <div class="grid">${PLAN.map(f => fieldHTML(f, pl[f.k])).join('')}</div></form>
   <div class="card"><h2>Metas terapêuticas</h2>
@@ -1197,6 +1336,7 @@ function vConfig() {
         <p class="muted" style="margin-bottom:0">Espaço usado: ${(size / 1024).toFixed(0)} KB de ~5.000 KB disponíveis no navegador.</p></div>
       <div class="card"><h2>Segurança e aparência</h2>
         <p class="muted">Bloqueio automático após ${AUTOLOCK_MIN} minutos sem uso.</p>
+        <p class="muted">${cloud ? 'Sincronização ligada: os dados criptografados ficam na sua conta do claude.ai, visíveis só para você, e abrem em qualquer aparelho com a sua senha.' : 'Os dados ficam só neste aparelho. Pela página publicada no claude.ai, eles também sincronizam entre aparelhos.'}</p>
         <div class="row"><button class="btn" data-act="change-pw">Trocar senha</button><button class="btn" data-act="lock">Bloquear agora</button></div>
         <h3 style="margin-top:16px">Tema</h3><div class="row">${[['', 'Automático'], ['light', 'Claro'], ['dark', 'Escuro']].map(([v, l]) => `<button class="btn sm ${theme === v ? 'primary' : ''}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
         <h3 style="margin-top:16px">Zona de perigo</h3><button class="btn danger" data-act="wipe">Apagar todos os dados deste navegador</button></div>
@@ -1205,7 +1345,13 @@ function vConfig() {
 const _theme = actions.theme; actions.theme = d => { _theme(d); render(); };
 
 /* ---------- roteador ---------- */
-function route() { const [page, id, tab] = (location.hash.slice(2) || 'inicio').split('/'); return { page, id, tab }; }
+let curRoute = 'inicio';
+function go(path) {
+  const top = x => x.split('/').slice(0, 2).join('/');
+  if (top(path) !== top(curRoute)) window.scrollTo(0, 0);
+  curRoute = path; render();
+}
+function route() { const [page, id, tab] = (curRoute || 'inicio').split('/'); return { page, id, tab }; }
 function render() {
   if (!db) return;
   const r = route();
@@ -1216,8 +1362,6 @@ function render() {
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (r.page === 'p' ? 'pacientes' : r.page)));
   if (focusKey) { const el = $(`[data-ui="${focusKey}"]`); if (el) { el.focus(); try { el.setSelectionRange(selStart, selStart); } catch {} } }
 }
-let lastPage = '';
-window.addEventListener('hashchange', () => { const k = location.hash.split('/').slice(0, 3).join('/'); if (k !== lastPage) window.scrollTo(0, 0); lastPage = k; render(); });
 
 showLock();
 </script>
