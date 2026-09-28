@@ -400,10 +400,11 @@ async function openVault(vault, pw) {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(vault.iv) }, k, b64d(vault.ct));
   return { data: JSON.parse(dec.decode(pt)), key: k, salt: s };
 }
-/* Armazenamento: cópia local (localStorage) + sincronização na conta do claude.ai (capability db),
-   numa área privada de cada usuário. Só o texto criptografado sai do aparelho. */
-let cloud = null, cloudUid = null, dlCap = null, lastVault = null, lastSavedAt = 0;
-let pendingVault = null, cloudTimer = null, cloudBusy = false;
+/* Armazenamento (formato 2). Os dados são divididos em partes: "core" (configurações) e uma parte por
+   paciente. Cada parte é criptografada separadamente, então cada alteração salva e envia só o que mudou.
+   Cópia local no IndexedDB (sem o limite de ~5 MB do localStorage) e, na página do claude.ai,
+   sincronização numa área privada da conta (capability db). Só texto criptografado sai do aparelho. */
+let cloud = null, cloudUid = null, dlCap = null;
 const CHUNK = 180000;
 const capsReady = (async () => {
   if (!window.claude?.use) return;
@@ -414,33 +415,140 @@ const capsReady = (async () => {
     if (d && id) { cloud = d; cloudUid = id; }
   } catch {}
 })();
+
+/* cópia local: IndexedDB, com localStorage como reserva */
+const kv = (() => {
+  const LS = 'duda.v2.';
+  let idb = null, useLS = false;
+  const open = () => idb ??= new Promise((res, rej) => {
+    try {
+      const r = indexedDB.open('duda-consultorio', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    } catch (e) { rej(e); }
+  });
+  async function withStore(mode, fn) {
+    const d = await open();
+    return new Promise((res, rej) => {
+      const t = d.transaction('kv', mode), r = fn(t.objectStore('kv'));
+      t.oncomplete = () => res(r ? r.result : undefined);
+      t.onerror = t.onabort = () => rej(t.error || new Error('idb'));
+    });
+  }
+  return {
+    async get(k) {
+      if (!useLS) { try { return await withStore('readonly', st => st.get(k)); } catch { useLS = true; } }
+      try { return JSON.parse(localStorage.getItem(LS + k) || 'null') ?? undefined; } catch { return undefined; }
+    },
+    async write(puts, dels = []) {
+      if (!useLS) {
+        try { await withStore('readwrite', st => { for (const [k, v] of Object.entries(puts)) st.put(v, k); for (const k of dels) st.delete(k); }); return; }
+        catch { useLS = true; }
+      }
+      for (const [k, v] of Object.entries(puts)) localStorage.setItem(LS + k, JSON.stringify(v));
+      for (const k of dels) localStorage.removeItem(LS + k);
+    },
+    async clear() {
+      try { await withStore('readwrite', st => { st.clear(); }); } catch {}
+      try { Object.keys(localStorage).filter(k => k.startsWith(LS)).forEach(k => localStorage.removeItem(k)); } catch {}
+    },
+  };
+})();
+
+let idx = null;               // índice: {fmt, salt, saltAt, check, parts: {id: savedAt}, dead: {id: quando foi apagado}, savedAt}
+let savedJSON = {};           // id da parte -> JSON aberto da última versão salva
+let partSize = {};            // id da parte -> tamanho criptografado
+let cloudQueue = new Map();   // id -> parte criptografada a enviar, ou null para apagar
+let cloudTimer = null, cloudBusy = false, cloudSeen = 0, legacyCleanup = false, persisting = Promise.resolve();
+
+const PART_KEYS = ['sessions', 'payments', 'invoices', 'contacts', 'records'];
+const partId = pid => 'p-' + String(pid).replace(/[^A-Za-z0-9_-]/g, '_');
+function splitDB(d) {
+  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm } }, by = {};
+  for (const p of d.patients) by[p.id] = parts[partId(p.id)] = { patient: p, sessions: [], payments: [], invoices: [], contacts: [], records: [] };
+  for (const k of PART_KEYS) for (const r of d[k]) by[r.pacienteId]?.[k].push(r);
+  return parts;
+}
+function joinDB(parts) {
+  const d = emptyDB(), c = parts.core || {};
+  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm;
+  for (const [id, x] of Object.entries(parts)) {
+    if (id === 'core' || !x?.patient) continue;
+    d.patients.push(x.patient);
+    for (const k of PART_KEYS) d[k].push(...(x[k] || []));
+  }
+  return migrate(d);
+}
+async function encPart(text, k = key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, enc.encode(text));
+  return { iv: b64e(iv), ct: b64e(ct) };
+}
+async function decPart(e, k = key) { return dec.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(e.iv) }, k, b64d(e.ct))); }
+async function newIndex(prev) {
+  const now = Date.now();
+  return { fmt: 2, parts: {}, dead: {}, ...(prev || {}), salt: b64e(salt), saltAt: now, check: await encPart('consultorio-ok'), savedAt: now };
+}
+function mergeIndex(a, b) {
+  if (!a) return b; if (!b) return a;
+  const base = (b.saltAt || 0) >= (a.saltAt || 0) ? b : a;
+  const out = { ...base, parts: {}, dead: { ...(a.dead || {}) }, savedAt: Math.max(a.savedAt || 0, b.savedAt || 0) };
+  for (const [id, t] of Object.entries(b.dead || {})) out.dead[id] = Math.max(out.dead[id] || 0, t);
+  for (const src of [a, b]) for (const [id, t] of Object.entries(src.parts || {})) out.parts[id] = Math.max(out.parts[id] || 0, t);
+  for (const [id, t] of Object.entries(out.dead)) { if ((out.parts[id] || 0) <= t) delete out.parts[id]; else delete out.dead[id]; }
+  return out;
+}
+
+/* nuvem: índice "i", uma ficha "m-<parte>" por parte e, para partes grandes, pedaços "x-<parte>-<versão>-<n>" */
 const cbase = () => `data/users/${cloudUid}`;
-function localVault() { try { return JSON.parse(localStorage.getItem(STORE) || 'null'); } catch { return null; } }
-async function cloudLoad() {
-  const m = await cloud.doc(cbase() + '/vault').get();
+const cpath = id => `${cbase()}/${id}`;
+async function cloudGetIndex() { const s = await cloud.doc(cpath('i')).get(); return s.exists ? s.data() : null; }
+async function cloudGetPart(id) {
+  const m = await cloud.doc(cpath('m-' + id)).get();
   if (!m.exists) return null;
-  const meta = m.data(); let ct = '';
-  for (let i = 0; i < meta.n; i++) {
-    const c = await cloud.doc(`${cbase()}/c-${meta.ver}-${i}`).get();
-    if (!c.exists) throw new Error('parte do cofre ausente');
+  const meta = m.data(); let ct = meta.d || '';
+  for (let i = 0; i < (meta.n || 0); i++) {
+    const c = await cloud.doc(cpath(`x-${id}-${meta.ver}-${i}`)).get();
+    if (!c.exists) throw new Error('parte incompleta');
     ct += c.data().d;
   }
-  return { app: 'duda-pacientes', v: 1, salt: meta.salt, iv: meta.iv, ct, savedAt: meta.savedAt };
+  return { iv: meta.iv, ct, savedAt: meta.savedAt };
 }
-async function cloudSave(v) {
-  const ver = Date.now().toString(36) + Math.random().toString(36).slice(2, 6), n = Math.max(1, Math.ceil(v.ct.length / CHUNK));
-  for (let i = 0; i < n; i++) await cloud.doc(`${cbase()}/c-${ver}-${i}`).set({ d: v.ct.slice(i * CHUNK, (i + 1) * CHUNK) });
-  const old = (await cloud.doc(cbase() + '/vault').get()).data?.();
-  await cloud.doc(cbase() + '/vault').set({ salt: v.salt, iv: v.iv, n, ver, savedAt: v.savedAt });
-  if (old?.ver && old.ver !== ver) for (let i = 0; i < old.n; i++) { try { await cloud.doc(`${cbase()}/c-${old.ver}-${i}`).delete(); } catch {} }
+async function cloudDelChunks(id, meta) { for (let i = 0; i < (meta?.n || 0); i++) { try { await cloud.doc(cpath(`x-${id}-${meta.ver}-${i}`)).delete(); } catch {} } }
+async function cloudPutPart(id, e) {
+  const mp = cpath('m-' + id), old = (await cloud.doc(mp).get()).data?.();
+  let meta;
+  if (e.ct.length <= CHUNK) meta = { iv: e.iv, savedAt: e.savedAt, n: 0, d: e.ct };
+  else {
+    const ver = Date.now().toString(36) + Math.random().toString(36).slice(2, 6), n = Math.ceil(e.ct.length / CHUNK);
+    for (let i = 0; i < n; i++) await cloud.doc(cpath(`x-${id}-${ver}-${i}`)).set({ d: e.ct.slice(i * CHUNK, (i + 1) * CHUNK) });
+    meta = { iv: e.iv, savedAt: e.savedAt, n, ver };
+  }
+  await cloud.doc(mp).set(meta);
+  if (old?.n && old.ver !== meta.ver) await cloudDelChunks(id, old);
+}
+async function cloudDelPart(id) {
+  const mp = cpath('m-' + id), old = (await cloud.doc(mp).get()).data?.();
+  await cloud.doc(mp).delete();
+  await cloudDelChunks(id, old);
 }
 async function cloudWipe() {
   const all = await cloud.collection(cbase()).get();
-  for (const d of all.docs) { try { await cloud.doc(`${cbase()}/${d.id}`).delete(); } catch {} }
+  for (const d of all.docs) { try { await cloud.doc(cpath(d.id)).delete(); } catch {} }
 }
+/* formato antigo (um só cofre), lido uma vez para converter */
+function legacyLocal() { try { return JSON.parse(localStorage.getItem(STORE) || 'null'); } catch { return null; } }
+async function legacyCloud() {
+  const m = await cloud.doc(cpath('vault')).get();
+  if (!m.exists) return null;
+  const meta = m.data(); let ct = '';
+  for (let i = 0; i < meta.n; i++) { const c = await cloud.doc(cpath(`c-${meta.ver}-${i}`)).get(); if (!c.exists) throw new Error('cofre incompleto'); ct += c.data().d; }
+  return { salt: meta.salt, iv: meta.iv, ct, savedAt: meta.savedAt };
+}
+
 function setSync(state) {
   const el = $('#sync'); if (!el) return;
-  el.textContent = { local: 'salvo só neste aparelho', saving: 'sincronizando…', ok: '☁︎ sincronizado', err: '⚠ sem sincronizar' }[state];
+  el.textContent = { local: 'salvo neste aparelho', saving: 'sincronizando…', ok: '☁︎ sincronizado', err: '⚠ sem sincronizar' }[state];
   el.className = 'sync' + (state === 'err' ? ' bad' : '');
   el.title = state === 'err' ? 'Os dados estão salvos neste aparelho e serão enviados assim que a conexão voltar.' : '';
 }
@@ -449,36 +557,122 @@ function scheduleCloud() {
   clearTimeout(cloudTimer); cloudTimer = setTimeout(flushCloud, 1200);
 }
 async function flushCloud() {
-  if (cloudBusy) { cloudTimer = setTimeout(flushCloud, 800); return; }
-  const v = pendingVault; if (!v) return;
-  cloudBusy = true; pendingVault = null;
-  try { await cloudSave(v); setSync(pendingVault ? 'saving' : 'ok'); }
-  catch { if (!pendingVault) pendingVault = v; setSync('err'); cloudTimer = setTimeout(flushCloud, 15000); }
-  finally { cloudBusy = false; }
+  if (!cloud || !idx) return;
+  if (cloudBusy) { clearTimeout(cloudTimer); cloudTimer = setTimeout(flushCloud, 800); return; }
+  if (!cloudQueue.size) return;
+  cloudBusy = true; setSync('saving');
+  const batch = [...cloudQueue]; cloudQueue = new Map();
+  let lockMsg = '';
+  try {
+    const ci = await cloudGetIndex();
+    if (ci && ci.salt !== idx.salt && (ci.saltAt || 0) > (idx.saltAt || 0)) { lockMsg = 'A senha foi alterada em outro aparelho. Entre com a nova senha.'; return; }
+    for (const [id, e] of batch) { if (e) await cloudPutPart(id, e); else await cloudDelPart(id); }
+    const merged = mergeIndex(ci, idx);
+    await cloud.doc(cpath('i')).set(merged);
+    cloudSeen = merged.savedAt;
+    if (legacyCleanup) {
+      legacyCleanup = false;
+      try { const all = await cloud.collection(cbase()).get(); for (const d of all.docs) if (d.id === 'vault' || d.id.startsWith('c-')) await cloud.doc(cpath(d.id)).delete(); } catch {}
+    }
+    setSync(cloudQueue.size ? 'saving' : 'ok');
+  } catch {
+    for (const [id, e] of batch) if (!cloudQueue.has(id)) cloudQueue.set(id, e);
+    setSync('err'); clearTimeout(cloudTimer); cloudTimer = setTimeout(flushCloud, 15000);
+    return;
+  } finally {
+    cloudBusy = false;
+    if (lockMsg) showLock(lockMsg);
+  }
+  if (cloudQueue.size) scheduleCloud();
 }
-async function persist() {
-  const vault = await sealVault(db, key, salt);
-  vault.savedAt = Date.now();
-  lastVault = vault; lastSavedAt = vault.savedAt;
+
+/* salva só as partes que mudaram desde a última vez */
+function persist() { return persisting = persisting.then(persistNow, persistNow); }
+async function persistNow() {
+  if (!db || !key || !idx) return;
+  const parts = splitDB(db), now = Date.now(), puts = {}, dels = [];
+  for (const [id, x] of Object.entries(parts)) {
+    const json = JSON.stringify(x);
+    if (savedJSON[id] === json) continue;
+    const e = { ...(await encPart(json)), savedAt: now };
+    puts['part:' + id] = e; idx.parts[id] = now; delete idx.dead[id];
+    savedJSON[id] = json; partSize[id] = e.ct.length;
+    if (cloud) cloudQueue.set(id, e);
+  }
+  for (const id of Object.keys(savedJSON)) if (!(id in parts)) {
+    delete savedJSON[id]; delete partSize[id]; delete idx.parts[id]; idx.dead[id] = now;
+    dels.push('part:' + id);
+    if (cloud) cloudQueue.set(id, null);
+  }
+  if (!Object.keys(puts).length && !dels.length) return;
+  idx.savedAt = now; puts.index = idx;
   let localOk = true;
-  try { localStorage.setItem(STORE, JSON.stringify(vault)); } catch { localOk = false; }
-  if (cloud) { pendingVault = vault; scheduleCloud(); }
+  try { await kv.write(puts, dels); } catch { localOk = false; }
+  if (cloud) scheduleCloud();
   else if (!localOk) notice('Não foi possível salvar', 'O armazenamento do navegador está cheio ou bloqueado. Faça um backup agora em Configurações.');
   else setSync('local');
 }
+
+/* abre os dados: junta a cópia do aparelho e a da conta, ficando com a versão mais nova de cada parte */
+async function loadAll(pw, info) {
+  const { li, ci } = info;
+  const main = ci && (!li || (ci.saltAt || 0) > (li.saltAt || 0)) ? ci : li;
+  const s = b64d(main.salt), k = await deriveKey(pw, s);
+  try { await decPart(main.check, k); } catch { throw new Error('senha'); }
+  const useLocal = li && li.salt === main.salt, useCloud = ci && ci.salt === main.salt;
+  const merged = mergeIndex(useLocal ? li : null, useCloud ? ci : null);
+  const parts = {}, toLocal = {}, sj = {}, sz = {}, queue = new Map(); let missing = 0;
+  for (const id of Object.keys(merged.parts || {})) {
+    const lrec = useLocal ? await kv.get('part:' + id) : null;
+    const ct = useCloud ? (ci.parts?.[id] || 0) : 0;
+    let rec = null, from = '';
+    if (lrec && (lrec.savedAt || 0) >= ct) { rec = lrec; from = 'local'; }
+    else if (cloud && ct) { try { rec = await cloudGetPart(id); from = 'cloud'; } catch {} if (!rec && lrec) { rec = lrec; from = 'local'; } }
+    let json = null;
+    if (rec) { try { json = await decPart(rec, k); } catch {} }
+    if (json == null && from === 'cloud' && lrec) { try { json = await decPart(lrec, k); rec = lrec; from = 'local'; } catch {} }
+    if (json == null) { missing++; continue; }
+    parts[id] = JSON.parse(json); sj[id] = json; sz[id] = rec.ct.length;
+    if (from === 'cloud') toLocal['part:' + id] = rec;
+    else if (cloud && (!ct || ct < (rec.savedAt || 0))) queue.set(id, rec);
+  }
+  key = k; salt = s;
+  idx = { ...merged, salt: main.salt, saltAt: main.saltAt, check: main.check, parts: { ...(merged.parts || {}) }, dead: { ...(merged.dead || {}) } };
+  savedJSON = sj; partSize = sz; cloudQueue = queue; cloudSeen = useCloud ? (ci.savedAt || 0) : 0;
+  db = joinDB(parts);
+  toLocal.index = idx;
+  try { await kv.write(toLocal); } catch {}
+  if (cloud && queue.size) scheduleCloud();
+  return missing;
+}
+
 /* ao voltar para a aba, busca alterações feitas em outro aparelho */
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState !== 'visible' || !cloud || !db || pendingVault || cloudBusy || $('#dlg').open) return;
+  if (document.visibilityState !== 'visible' || !cloud || !db || !idx || cloudBusy || cloudQueue.size || $('#dlg').open) return;
   try {
-    const m = await cloud.doc(cbase() + '/vault').get();
-    if (!m.exists || !(m.data().savedAt > lastSavedAt)) return;
-    const v = await cloudLoad();
-    try {
-      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(v.iv) }, key, b64d(v.ct));
-      db = migrate(JSON.parse(dec.decode(pt))); lastVault = v; lastSavedAt = v.savedAt;
-      try { localStorage.setItem(STORE, JSON.stringify(v)); } catch {}
-      render(); toast('Atualizado com as alterações de outro aparelho.');
-    } catch { showLock('A senha foi alterada em outro aparelho.'); }
+    await persisting;
+    const ci = await cloudGetIndex();
+    if (!ci || (ci.savedAt || 0) <= cloudSeen) return;
+    if (ci.salt !== idx.salt) { showLock('A senha foi alterada em outro aparelho. Entre com a nova senha.'); return; }
+    const parts = splitDB(db), toLocal = {}, dels = []; let changed = false;
+    for (const [id, t] of Object.entries(ci.parts || {})) {
+      if (t <= (idx.parts[id] || 0)) continue;
+      const rec = await cloudGetPart(id); if (!rec) continue;
+      const json = await decPart(rec);
+      parts[id] = JSON.parse(json); savedJSON[id] = json; partSize[id] = rec.ct.length; idx.parts[id] = rec.savedAt;
+      toLocal['part:' + id] = rec; changed = true;
+    }
+    for (const [id, t] of Object.entries(ci.dead || {})) {
+      if (!(id in parts) || t < (idx.parts[id] || 0)) continue;
+      delete parts[id]; delete savedJSON[id]; delete partSize[id]; delete idx.parts[id]; idx.dead[id] = t;
+      dels.push('part:' + id); changed = true;
+    }
+    cloudSeen = ci.savedAt;
+    if (!changed) return;
+    db = joinDB(parts);
+    toLocal.index = idx;
+    try { await kv.write(toLocal, dels); } catch {}
+    render(); toast('Atualizado com as alterações de outro aparelho.');
   } catch {}
 });
 async function commit(msg) {
@@ -489,9 +683,18 @@ async function commit(msg) {
 }
 
 /* ---------- tela de bloqueio ---------- */
-let unlockVault = null, unlockIsCloud = false;
+let unlockInfo = null, locking = false;
 async function showLock(reason) {
-  db = null; key = null; salt = null;
+  if (locking) return;
+  locking = true;
+  try { await showLockNow(reason); } finally { locking = false; }
+}
+async function showLockNow(reason) {
+  if (db && key) {  // antes de bloquear, termina de salvar e enviar o que estiver pendente
+    try { await persisting; } catch {}
+    if (cloud && cloudQueue.size) { clearTimeout(cloudTimer); try { await flushCloud(); } catch {} }
+  }
+  db = null; key = null; salt = null; idx = null; savedJSON = {}; partSize = {};
   const dlg = $('#dlg'); if (dlg.open) dlg.close();
   $('#main').innerHTML = '';
   $('#app').hidden = true;
@@ -502,12 +705,13 @@ async function showLock(reason) {
   }
   L.innerHTML = '<div class="card"><p>Carregando…</p></div>';
   await capsReady;
-  let cv = null, cloudErr = false;
-  if (cloud) { try { cv = await cloudLoad(); } catch { cloudErr = true; } }
-  const lv = localVault();
-  unlockIsCloud = !!cv && (!lv || (cv.savedAt || 0) >= (lv.savedAt || 0));
-  unlockVault = unlockIsCloud ? cv : lv;
-  const has = !!unlockVault;
+  let li = null, ci = null, lv = null, cv = null, cloudErr = false;
+  try { li = (await kv.get('index')) || null; } catch {}
+  if (cloud) { try { ci = await cloudGetIndex(); if (!ci && !li) cv = await legacyCloud(); } catch { cloudErr = true; } }
+  if (!li && !ci) lv = legacyLocal();
+  const legacy = !li && !ci ? ((cv && (!lv || (cv.savedAt || 0) >= (lv.savedAt || 0))) ? cv : lv) : null;
+  unlockInfo = { li, ci, legacy, legacyFromCloud: !!cv };
+  const has = !!(li || ci || legacy);
   if (cloudErr && !has) { L.innerHTML = `<div class="card"><h2>Sem conexão</h2><p>Não foi possível buscar os dados na sua conta. Verifique a internet e recarregue a página.</p></div>`; return; }
   L.innerHTML = has ? `
     <form class="card" id="unlockForm">
@@ -537,18 +741,32 @@ document.addEventListener('submit', async e => {
   if (f.id === 'unlockForm') {
     e.preventDefault();
     const btn = $('button', f); btn.disabled = true; $('#lockErr').textContent = '';
+    const info = unlockInfo;
     try {
-      const r = await openVault(unlockVault, f.pw.value);
-      db = migrate(r.data); key = r.key; salt = r.salt; lastVault = unlockVault; lastSavedAt = unlockVault.savedAt || 0;
-      start();
-      if (cloud && !unlockIsCloud) await persist(); // envia para a conta o que só existia neste aparelho
-    } catch { $('#lockErr').textContent = 'Senha incorreta.'; btn.disabled = false; f.pw.select(); }
+      if (info.legacy) {
+        // formato antigo: abre o cofre único e converte para partes
+        let r; try { r = await openVault(info.legacy, f.pw.value); } catch { throw new Error('senha'); }
+        key = r.key; salt = r.salt; db = migrate(r.data);
+        idx = await newIndex(); savedJSON = {}; partSize = {}; cloudQueue = new Map(); legacyCleanup = info.legacyFromCloud;
+        start(); await persist();
+        try { localStorage.removeItem(STORE); } catch {}
+      } else {
+        const missing = await loadAll(f.pw.value, info);
+        start();
+        if (missing) notice('Alguns dados não abriram', `${missing} ficha(s) não puderam ser abertas agora. Elas continuam guardadas. Recarregue a página mais tarde.`);
+      }
+    } catch (err) {
+      db = null; key = null; idx = null;
+      $('#lockErr').textContent = err?.message === 'senha' ? 'Senha incorreta.' : 'Não foi possível abrir os dados. Verifique a conexão e tente de novo.';
+      btn.disabled = false; f.pw.select();
+    }
   } else if (f.id === 'setupForm') {
     e.preventDefault();
     if (f.pw1.value !== f.pw2.value) { $('#lockErr').textContent = 'As senhas não conferem.'; return; }
     salt = crypto.getRandomValues(new Uint8Array(16));
     key = await deriveKey(f.pw1.value, salt);
     db = migrate(pendingImport || emptyDB()); pendingImport = null;
+    idx = await newIndex(); savedJSON = {}; partSize = {}; cloudQueue = new Map();
     curRoute = db.settings.nome ? 'inicio' : 'config';
     start(); await persist();
     toast(db.patients.length ? 'Backup restaurado.' : 'Tudo pronto! Preencha seus dados profissionais.');
@@ -1036,14 +1254,17 @@ actions.import = async () => {
 actions['change-pw'] = () => openForm({ title: 'Trocar senha', fields: [
   { k: 'atual', l: 'Senha atual', t: 'password', req: true, w: 'full' }, { k: 'nova', l: 'Nova senha (mín. 6)', t: 'password', req: true }, { k: 'conf', l: 'Repita a nova senha', t: 'password', req: true }],
   onSave: async v => {
-    try { await openVault(lastVault, v.atual); } catch { notice('Senha atual incorreta.'); return false; }
+    try { await decPart(idx.check, await deriveKey(v.atual, b64d(idx.salt))); } catch { notice('Senha atual incorreta.'); return false; }
     if (v.nova.length < 6 || v.nova !== v.conf) { notice('Confira a nova senha', 'Ela precisa ter pelo menos 6 caracteres, e as duas precisam ser iguais.'); return false; }
+    await persisting;
     salt = crypto.getRandomValues(new Uint8Array(16)); key = await deriveKey(v.nova, salt);
+    idx = await newIndex(idx); savedJSON = {};  // tudo é recriptografado com a nova senha
     await commit('Senha alterada. Backups antigos continuam com a senha antiga.');
   } });
 actions.wipe = async () => {
   if (!(await ask({ title: 'Apagar todos os dados?', text: cloud ? 'Apaga os dados deste aparelho e da sua conta (todos os aparelhos). Faça um backup antes.' : 'Apaga todos os dados deste navegador. Faça um backup antes.', ok: 'Apagar tudo', danger: true, typeWord: 'APAGAR TUDO' }))) return;
-  clearTimeout(cloudTimer); pendingVault = null;
+  clearTimeout(cloudTimer); cloudQueue = new Map(); db = null; key = null; idx = null;
+  await kv.clear();
   try { localStorage.removeItem(STORE); } catch {}
   if (cloud) { try { await cloudWipe(); } catch {} }
   curRoute = 'inicio'; showLock();
@@ -1322,7 +1543,8 @@ function vContacts() {
 }
 
 function vConfig() {
-  let size = 0; try { size = (localStorage.getItem(STORE) || '').length * 2; } catch {}
+  const size = Object.values(partSize).reduce((a, b) => a + b, 0);
+  const sizeTxt = size < 1e6 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1048576).toFixed(1).replace('.', ',')} MB`;
   const theme = document.documentElement.dataset.theme || '';
   return `<div class="head"><h1>Configurações</h1></div>
     <form class="card" data-submit="save-settings"><div class="grid">${SETTINGS_FIELDS.map(f => fieldHTML(f, db.settings[f.k])).join('')}</div>
@@ -1333,7 +1555,7 @@ function vConfig() {
         <div class="row"><button class="btn primary" data-act="export-vault">Baixar backup criptografado</button><button class="btn" data-act="import">Restaurar backup</button></div>
         <p class="muted">O backup criptografado só abre com a senha atual. Para levar a outro computador, abra este arquivo lá e escolha “Restaurar backup”.</p>
         <button class="btn sm" data-act="export-json">Exportar dados abertos (sem criptografia)</button>
-        <p class="muted" style="margin-bottom:0">Espaço usado: ${(size / 1024).toFixed(0)} KB de ~5.000 KB disponíveis no navegador.</p></div>
+        <p class="muted" style="margin-bottom:0">Tamanho dos dados (criptografados): ${sizeTxt}.</p></div>
       <div class="card"><h2>Segurança e aparência</h2>
         <p class="muted">Bloqueio automático após ${AUTOLOCK_MIN} minutos sem uso.</p>
         <p class="muted">${cloud ? 'Sincronização ligada: os dados criptografados ficam na sua conta do claude.ai, visíveis só para você, e abrem em qualquer aparelho com a sua senha.' : 'Os dados ficam só neste aparelho. Pela página publicada no claude.ai, eles também sincronizam entre aparelhos.'}</p>

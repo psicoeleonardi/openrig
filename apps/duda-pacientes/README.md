@@ -57,6 +57,12 @@ A NFS-e é emitida no sistema da prefeitura ou no **Emissor Nacional** (https://
 - O backup criptografado só abre com a senha. A exportação "dados abertos" não tem criptografia: use apenas se precisar e guarde em local seguro.
 - Os documentos impressos levam a nota de sigilo. A Resolução CFP nº 01/2009 pede que o registro documental seja guardado por no mínimo 5 anos.
 
+## Espaço e desempenho
+
+Cada paciente é guardado numa parte separada e criptografada. Por isso, ao salvar, o app envia só o paciente alterado, mesmo com anos de histórico. A cópia do aparelho fica no IndexedDB do navegador, que comporta centenas de MB. Para comparação, um ano de consultório com 20 pacientes e evolução em todas as sessões ocupa cerca de 3 MB. Em Configurações aparece o tamanho atual dos dados.
+
+Dados salvos pela versão anterior (tudo num único bloco) são convertidos sozinhos na primeira vez que o app é aberto, sem precisar fazer nada.
+
 ## Levar para outro computador
 
 1. No computador antigo: Configurações → *Baixar backup criptografado*.
