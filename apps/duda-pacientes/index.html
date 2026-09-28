@@ -229,6 +229,7 @@ function addMonths(s, n) {
 const daysUntil = s => Math.round((parseISO(s) - parseISO(today())) / 864e5);
 const fmtD = s => s ? s.split('-').reverse().join('/') : '—';
 const WD = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+const WD_FULL = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
 const fmtDW = s => s ? `${WD[parseISO(s).getDay()]}, ${fmtD(s)}` : '—';
 const MONTHS = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
 const fmtMonth = ym => ym ? `${MONTHS[Number(ym.slice(5, 7)) - 1]} de ${ym.slice(0, 4)}` : '';
@@ -354,7 +355,7 @@ function emptyDB() {
 function migrate(d) {
   for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL }, d.settings || {});
-  for (const p of d.patients) { p.responsaveis ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
+  for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
 }
 const P = id => db.patients.find(p => p.id === id);
@@ -676,6 +677,7 @@ document.addEventListener('visibilitychange', async () => {
   } catch {}
 });
 async function commit(msg) {
+  topUpSeries();
   db.atualizadoEm = new Date().toISOString();
   await persist();
   render();
@@ -777,6 +779,7 @@ document.addEventListener('submit', async e => {
 });
 
 function start() {
+  if (topUpSeries()) persist();
   $('#lock').hidden = true; $('#lock').innerHTML = '';
   $('#app').hidden = false;
   lastActive = Date.now();
@@ -934,13 +937,35 @@ actions['new-patient'] = () => openForm({
   title: 'Novo paciente', fields: patientFields(),
   values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true },
   onSave: async v => {
-    const p = { id: uid(), ...v, responsaveis: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
+    const p = { id: uid(), ...v, responsaveis: [], series: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
     db.patients.push(p);
     curRoute = `p/${p.id}/dados`;
     await commit(isMinor(p) ? 'Paciente cadastrado. Agora adicione os responsáveis.' : 'Paciente cadastrado.');
   },
 });
-actions['edit-patient'] = ({ id }) => { const p = P(id); openForm({ title: 'Editar paciente', fields: patientFields(), values: p, onSave: async v => { Object.assign(p, v); await commit('Dados atualizados.'); } }); };
+actions['edit-patient'] = ({ id }) => {
+  const p = P(id);
+  openForm({ title: 'Editar paciente', fields: patientFields(), values: p, onSave: async v => {
+    const antes = { status: p.status, valor: p.valor };
+    p.series ||= [];
+    Object.assign(p, v);
+    const fut = sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today());
+    let msg = 'Dados atualizados.';
+    if (antes.status === 'ativo' && p.status !== 'ativo' && fut.length &&
+      await ask({ title: `Remover as ${fut.length} sessões agendadas?`, text: `${p.nome} deixou de estar ativo(a). O horário fixo fica suspenso e volta a criar sessões se a situação voltar para “Ativo”.`, ok: 'Remover sessões', cancel: 'Manter' })) {
+      const rm = new Set(fut.map(s => s.id)); db.sessions = db.sessions.filter(s => !rm.has(s.id));
+      p.series.filter(sr => sr.ativa && sr.gerado >= today()).forEach(sr => { sr.gerado = addDays(today(), -1); });  // ao voltar a ativo, recomeça de hoje
+      msg = `Dados atualizados. ${rm.size} sessão(ões) removida(s).`;
+    }
+    if (num(antes.valor) !== num(p.valor) && p.valor !== '') {
+      p.series.filter(sr => sr.ativa && num(sr.valor) === num(antes.valor)).forEach(sr => { sr.valor = p.valor; });
+      const up = sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today() && num(s.valor) === num(antes.valor));
+      up.forEach(s => { s.valor = p.valor; });
+      if (up.length) msg += ` Novo valor aplicado a ${up.length} sessão(ões) futura(s).`;
+    }
+    await commit(msg);
+  } });
+};
 actions['del-patient'] = async ({ id }) => {
   const p = P(id);
   if (!(await ask({ title: `Excluir ${p.nome}?`, text: 'Todos os registros serão apagados: atendimentos, pagamentos, notas, contatos e prontuário. Não dá para desfazer.', ok: 'Excluir paciente', danger: true, typeWord: 'EXCLUIR' }))) return;
@@ -978,18 +1003,86 @@ function sessionFields(isNew) {
     { k: 'motivo', l: 'Motivo (falta, cancelamento ou reagendamento)', w: 'full' },
     { k: 'obs', l: 'Observações administrativas', t: 'textarea', rows: 2, hint: 'Anotações clínicas vão no prontuário.' },
   ];
-  if (isNew) f.push({ k: 'repetir', l: 'Repetir semanalmente (nº de semanas adicionais)', t: 'number', hint: 'Ex.: 7 cria esta sessão e mais 7, uma por semana.' });
+  if (isNew) f.unshift({ k: 'repeticao', l: 'Repetição', t: 'select', w: 'full', opts: [['', 'Só esta sessão'], ...Object.entries(SERIE_TXT).map(([k, t]) => [k, t + ', até encerrar'])],
+    hint: 'Horário fixo: o app mantém os próximos 2 meses agendados e cria as seguintes sozinho, até você encerrar.' });
   return f;
 }
+
+/* horário fixo: sessões recorrentes sem data de término. O app mantém sempre as próximas
+   HORIZON_DAYS agendadas; o id de cada sessão gerada é fixo (série + data), então dois aparelhos
+   nunca duplicam a mesma sessão, e uma sessão excluída não volta (a série guarda até onde já gerou). */
+const HORIZON_DAYS = 56;
+const SERIE_TXT = { 1: 'Toda semana', 2: 'A cada 2 semanas', 4: 'A cada 4 semanas' };
+const serieResumo = sr => `${SERIE_TXT[sr.intervalo] || 'Toda semana'}, ${WD_FULL[parseISO(sr.inicio).getDay()]}${sr.hora ? ' às ' + sr.hora.replace(':', 'h') : ''}`;
+function topUpSeries() {
+  if (!db) return 0;
+  const t = today(), until = addDays(t, HORIZON_DAYS), ids = new Set(db.sessions.map(s => s.id));
+  let n = 0;
+  for (const p of db.patients) {
+    if (p.status !== 'ativo') continue;
+    for (const sr of p.series || []) {
+      if (!sr.ativa) continue;
+      const step = 7 * (sr.intervalo || 1);
+      // próxima data alinhada ao dia da semana de início; depois de uma pausa, não cria sessões no passado
+      const min = sr.gerado ? (addDays(sr.gerado, 1) > t ? addDays(sr.gerado, 1) : t) : sr.inicio;
+      const gap = Math.round((parseISO(min) - parseISO(sr.inicio)) / 864e5);
+      let d = addDays(sr.inicio, Math.max(0, Math.ceil(gap / step)) * step);
+      while (d <= until && (!sr.fim || d < sr.fim)) {
+        const id = `${sr.id}-${d}`;
+        if (!ids.has(id)) {
+          db.sessions.push({ id, pacienteId: p.id, serieId: sr.id, data: d, hora: sr.hora, duracao: sr.duracao, valor: sr.valor, modalidade: sr.modalidade, status: 'agendado' });
+          ids.add(id); n++;
+        }
+        sr.gerado = d; d = addDays(d, step);
+      }
+    }
+  }
+  return n;
+}
+const futureOfSerie = (sid, from) => db.sessions.filter(s => s.serieId === sid && s.status === 'agendado' && s.data >= from);
+function endSerie(p, sr, from) {
+  const rm = new Set(futureOfSerie(sr.id, from).map(s => s.id));
+  db.sessions = db.sessions.filter(s => !rm.has(s.id));
+  sr.ativa = false; sr.fim = from;
+  return rm.size;
+}
+function newSerie(p, v) {
+  p.series ||= [];
+  const sr = { id: 'h' + uid().replace(/-/g, '').slice(0, 10), inicio: v.data, hora: v.hora, duracao: v.duracao || db.settings.duracaoPadrao, valor: v.valor !== '' && v.valor != null ? v.valor : p.valor, modalidade: v.modalidade, intervalo: Number(v.repeticao || v.intervalo) || 1, ativa: true, criadaEm: today() };
+  p.series.push(sr); topUpSeries();
+  return sr;
+}
+actions['end-serie'] = ({ pid, sid }) => {
+  const p = P(pid), sr = p.series.find(x => x.id === sid);
+  openForm({ title: 'Encerrar horário fixo', saveLabel: 'Encerrar',
+    intro: `<p class="muted">${esc(serieResumo(sr))}. As sessões agendadas a partir da data abaixo serão removidas. Sessões já realizadas, faltas e cancelamentos continuam no histórico.</p>`,
+    fields: [{ k: 'fim', l: 'Remover as sessões a partir de', t: 'date', req: true }], values: { fim: today() },
+    onSave: async v => { const n = endSerie(p, sr, v.fim); await commit(`Horário fixo encerrado. ${n} sessão(ões) futura(s) removida(s).`); } });
+};
+actions['change-serie'] = ({ pid, sid }) => {
+  const p = P(pid), sr = p.series.find(x => x.id === sid);
+  const next = futureOfSerie(sid, today()).sort(bySess)[0];
+  openForm({ title: 'Mudar horário fixo', saveLabel: 'Mudar horário',
+    intro: `<p class="muted">Atual: ${esc(serieResumo(sr))}. As sessões agendadas no horário antigo a partir da data abaixo são trocadas pelas do novo horário.</p>`,
+    fields: [{ k: 'data', l: 'Primeira sessão no novo horário', t: 'date', req: true, hint: 'O dia da semana desta data passa a ser o dia fixo.' }, { k: 'hora', l: 'Horário', t: 'time' },
+      { k: 'intervalo', l: 'Repetição', t: 'select', opts: Object.entries(SERIE_TXT) }, { k: 'duracao', l: 'Duração (min)', t: 'number' },
+      { k: 'valor', l: 'Valor (R$)', t: 'money' }, { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online'] }],
+    values: { data: next?.data || today(), hora: sr.hora, intervalo: String(sr.intervalo), duracao: sr.duracao, valor: sr.valor, modalidade: sr.modalidade },
+    onSave: async v => { endSerie(p, sr, v.data); newSerie(p, v); await commit(`Horário fixo mudado: ${serieResumo(p.series[p.series.length - 1])}.`); } });
+};
 function newSession(pid, preset = {}) {
   const p = P(pid);
   openForm({
     title: `Agendar — ${p.nome}`, fields: sessionFields(true),
     values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
     onSave: async v => {
-      const n = Math.max(0, Math.min(104, parseInt(v.repetir) || 0)); delete v.repetir;
-      for (let i = 0; i <= n; i++) db.sessions.push({ id: uid(), pacienteId: pid, ...v, data: addDays(v.data, 7 * i), status: i ? 'agendado' : v.status });
-      await commit(n ? `${n + 1} sessões agendadas.` : 'Sessão salva.');
+      const rep = v.repeticao; delete v.repeticao;
+      if (!rep) { db.sessions.push({ id: uid(), pacienteId: pid, ...v }); await commit('Sessão salva.'); return; }
+      if (p.status !== 'ativo') { notice('Paciente não está ativo', 'O horário fixo só cria sessões para pacientes com situação “Ativo”. Mude a situação em Editar dados.'); return false; }
+      const sr = newSerie(p, { ...v, repeticao: rep });
+      const first = S(`${sr.id}-${v.data}`);  // a primeira sessão recebe o que foi preenchido no formulário
+      if (first) Object.assign(first, { status: v.status, cobrar: v.cobrar, motivo: v.motivo, obs: v.obs });
+      await commit(`Horário fixo criado: ${serieResumo(sr)}.`);
     },
   });
 }
@@ -1294,6 +1387,7 @@ function sessDetail(s) {
   const bits = [];
   if (s.status === 'reagendado' && s.reagendadoPara) bits.push(`→ ${fmtD(s.reagendadoPara.data)} ${esc(s.reagendadoPara.hora || '')}`);
   if (s.reagendadoDe) { const o = S(s.reagendadoDe); bits.push(`reagendada${o ? ' de ' + fmtD(o.data) : ''}`); }
+  if (s.serieId) bits.push('↻ horário fixo');
   if (s.motivo) bits.push(esc(s.motivo));
   if ((s.status === 'falta' || s.status === 'cancelado')) bits.push(s.cobrar ? 'cobrada' : 'não cobrada');
   return bits.length ? `<div class="muted">${bits.join(' · ')}</div>` : '';
@@ -1302,7 +1396,7 @@ function sessTable(list, { showPat = true } = {}) {
   if (!list.length) return '<div class="empty">Nenhum atendimento.</div>';
   return `<div class="tw"><table><thead><tr><th>Data</th>${showPat ? '<th>Paciente</th>' : ''}<th>Situação</th><th class="num">Valor</th><th></th></tr></thead><tbody>${list.map(s => {
     const p = P(s.pacienteId);
-    return `<tr><td>${fmtDW(s.data)}<div class="muted">${esc(s.hora || '')}${s.duracao ? ` · ${esc(s.duracao)} min` : ''}${s.modalidade ? ' · ' + esc(s.modalidade) : ''}</div></td>
+    return `<tr><td>${fmtDW(s.data)}<div class="muted">${[s.hora && esc(s.hora), s.duracao && `${esc(s.duracao)} min`, s.modalidade && esc(s.modalidade)].filter(Boolean).join(' · ')}</div></td>
       ${showPat ? `<td><a href="#/p/${p.id}/atendimentos">${esc(p.nome)}</a>${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>` : ''}
       <td>${sBadge(s)}${sessDetail(s)}</td>
       <td class="num">${billable(s) || s.status === 'agendado' ? money(s.valor) : `<span class="muted">—</span>`}</td>
@@ -1408,6 +1502,7 @@ function vPatients() {
 
 function vPatient({ id, tab = 'dados' }) {
   const p = P(id);
+  if (p) p.series ||= [];
   if (!p) return `<div class="card">Paciente não encontrado. <a href="#/pacientes">Voltar</a></div>`;
   const minor = isMinor(p), a = age(p.nasc);
   const tabs = [['dados', 'Dados'], ['atendimentos', 'Atendimentos'], ['financeiro', 'Pagamentos e NF'], (minor || p.responsaveis.length) && ['contatos', 'Contatos c/ responsáveis'], ['prontuario', 'Prontuário'], ['estudo', 'Estudo de caso'], ['plano', 'Plano de tratamento']].filter(Boolean);
@@ -1425,7 +1520,7 @@ function tDados(p) {
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
       <dl class="kv">${kv('Nome', esc(p.nome))}${kv('Nome social', esc(p.nomeSocial))}${kv('Nascimento', p.nasc ? `${fmtD(p.nasc)} (${age(p.nasc)} anos)` : '')}${kv('CPF', esc(p.cpf))}${kv('RG', esc(p.rg))}${kv('Gênero', esc(p.genero))}
       ${kv('Telefone', p.telefone ? (waLink(p.telefone) ? `<a href="${waLink(p.telefone)}" target="_blank" rel="noopener">${esc(p.telefone)}</a>` : esc(p.telefone)) : '')}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
-    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
+    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
   <div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Responsáveis ${minor ? '' : '<span class="muted">(opcional para maiores de idade)</span>'}</h2><button class="btn sm primary" data-act="new-guardian" data-pid="${p.id}">+ Responsável</button></div>
@@ -1435,6 +1530,14 @@ function tDados(p) {
       <dl class="kv">${kv('CPF', esc(r.cpf))}${kv('RG', esc(r.rg))}${kv('Telefone', r.telefone ? (waLink(r.telefone) ? `<a href="${waLink(r.telefone)}" target="_blank" rel="noopener">${esc(r.telefone)}</a>` : esc(r.telefone)) : '')}${kv('E-mail', esc(r.email))}${kv('Profissão', esc(r.profissao))}${kv('Endereço', esc(r.endereco))}</dl>
       ${r.obs ? `<div class="muted pre">${esc(r.obs)}</div>` : ''}</div>`).join('') || (minor ? '' : '<div class="empty">Nenhum responsável cadastrado.</div>')}</div></div>`;
 }
+function seriesCard(p) {
+  const act = p.series.filter(sr => sr.ativa);
+  return `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Horário fixo</h2></div>
+    ${act.length ? act.map(sr => `<div class="row" style="justify-content:space-between;padding:6px 0;border-top:1px solid var(--line)">
+      <div><b>${esc(serieResumo(sr))}</b><div class="muted">desde ${fmtD(sr.inicio)}${sr.valor !== '' && sr.valor != null ? ' · ' + money(sr.valor) : ''}${sr.modalidade ? ' · ' + esc(sr.modalidade) : ''}${p.status !== 'ativo' ? ' · suspenso enquanto o paciente não estiver ativo' : ''}</div></div>
+      <div class="row"><button class="btn sm" data-act="change-serie" data-pid="${p.id}" data-sid="${sr.id}">Mudar horário</button><button class="btn sm danger" data-act="end-serie" data-pid="${p.id}" data-sid="${sr.id}">Encerrar</button></div></div>`).join('')
+      : `<p class="muted" style="margin:0">Sem horário fixo. Em “+ Agendar”, escolha a repetição “Toda semana, até encerrar” para criar um.</p>`}</div>`;
+}
 function tAtend(p) {
   const all = sessOf(p.id).sort(bySess), t = today();
   const fut = all.filter(s => s.status === 'agendado' && s.data >= t), past = all.filter(s => !(s.status === 'agendado' && s.data >= t)).reverse();
@@ -1443,6 +1546,7 @@ function tAtend(p) {
     <div class="stat"><b>${c('realizado')}</b><span>realizadas</span></div><div class="stat ${c('falta') ? 'bad' : ''}"><b>${c('falta')}</b><span>faltas</span></div>
     <div class="stat"><b>${c('cancelado')}</b><span>cancelamentos</span></div><div class="stat"><b>${c('reagendado')}</b><span>reagendamentos</span></div>
     <div class="stat"><b>${fut.length}</b><span>agendadas</span></div></div>
+    ${seriesCard(p)}
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Próximas sessões</h2><button class="btn sm primary" data-act="new-session" data-pid="${p.id}">+ Agendar</button></div>${sessTable(fut, { showPat: false })}</div>
     <div class="card"><h2>Histórico</h2>${sessTable(past, { showPat: false })}</div>`;
 }
