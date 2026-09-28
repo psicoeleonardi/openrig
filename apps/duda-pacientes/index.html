@@ -1,0 +1,1225 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consultório — Pacientes</title>
+<style>
+:root {
+  --bg: #f6f5f2; --surface: #ffffff; --surface-2: #f0eee9; --text: #23211d; --muted: #6d6961;
+  --line: #e2dfd8; --accent: #5b6ee1; --accent-ink: #ffffff; --accent-soft: #e8ebfc;
+  --ok: #1f8a5b; --ok-soft: #e1f3ea; --warn: #a86400; --warn-soft: #fbefd9;
+  --bad: #c03a3a; --bad-soft: #fbe3e3; --info: #2f6fb0; --info-soft: #e1ecf8;
+  --radius: 10px; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171716; --surface: #211f1e; --surface-2: #2a2826; --text: #ece9e4; --muted: #a09b93;
+    --line: #37342f; --accent: #8c9bf5; --accent-ink: #14151f; --accent-soft: #2b2f4a;
+    --ok: #5fcf98; --ok-soft: #1c3329; --warn: #f0b457; --warn-soft: #3a2d17;
+    --bad: #f07b7b; --bad-soft: #3d2020; --info: #7fb3ea; --info-soft: #1d2c3d;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171716; --surface: #211f1e; --surface-2: #2a2826; --text: #ece9e4; --muted: #a09b93;
+  --line: #37342f; --accent: #8c9bf5; --accent-ink: #14151f; --accent-soft: #2b2f4a;
+  --ok: #5fcf98; --ok-soft: #1c3329; --warn: #f0b457; --warn-soft: #3a2d17;
+  --bad: #f07b7b; --bad-soft: #3d2020; --info: #7fb3ea; --info-soft: #1d2c3d;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 1.45rem; margin: 0; }
+h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
+h3 { font-size: .95rem; margin: 0 0 .5rem; }
+.muted { color: var(--muted); font-size: .88em; }
+.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pre { white-space: pre-wrap; }
+
+/* layout */
+.top { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+.brand { font-weight: 700; white-space: nowrap; padding: 12px 0; }
+.nav { display: flex; gap: 2px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+.nav a { padding: 14px 10px; color: var(--muted); white-space: nowrap; border-bottom: 2px solid transparent; }
+.nav a:hover { color: var(--text); text-decoration: none; }
+.nav a.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.head .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); margin-bottom: 16px; min-width: 0; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.cols > .card { margin-bottom: 0; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+.stat b { display: block; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: .85rem; }
+.stat.warn b { color: var(--warn); } .stat.bad b { color: var(--bad); }
+
+/* buttons */
+.btn { font: inherit; border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 8px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.07); }
+.btn.danger { color: var(--bad); }
+.btn.sm { padding: 3px 8px; font-size: .85rem; }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn:disabled { opacity: .5; cursor: default; }
+
+/* tables */
+.tw { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td.acts { text-align: right; white-space: nowrap; }
+.empty { color: var(--muted); padding: 12px 0; text-align: center; }
+
+/* badges */
+.b { display: inline-block; font-size: .75rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+.b.ok { background: var(--ok-soft); color: var(--ok); }
+.b.warn { background: var(--warn-soft); color: var(--warn); }
+.b.bad { background: var(--bad-soft); color: var(--bad); }
+.b.info { background: var(--info-soft); color: var(--info); }
+.b.acc { background: var(--accent-soft); color: var(--accent); }
+
+/* menu */
+details.menu { display: inline-block; position: relative; }
+details.menu summary { list-style: none; }
+details.menu summary::-webkit-details-marker { display: none; }
+details.menu .items { position: fixed; z-index: 20; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); min-width: 170px; padding: 4px; display: flex; flex-direction: column; }
+details.menu .items button { text-align: left; border: 0; background: none; font: inherit; color: var(--text); padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+details.menu .items button:hover { background: var(--surface-2); }
+details.menu .items button.danger { color: var(--bad); }
+
+/* tabs */
+.tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); margin-bottom: 16px; scrollbar-width: none; }
+.tabs a { padding: 8px 12px; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+.tabs a.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tabs a:hover { text-decoration: none; color: var(--text); }
+
+/* forms */
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; }
+.full { grid-column: 1 / -1; }
+.fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fld > span { font-size: .82rem; font-weight: 600; color: var(--muted); }
+.fld small { color: var(--muted); font-size: .8rem; }
+input, select, textarea { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; min-width: 0; }
+textarea { resize: vertical; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.check { display: flex; align-items: center; gap: 8px; font-size: .92rem; }
+.check input { width: auto; }
+.checks { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+h3.sec { margin: 8px 0 -4px; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); }
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
+.toolbar .fld { flex: 1 1 150px; }
+dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(680px, calc(100vw - 24px)); max-height: calc(100vh - 32px); background: var(--surface); color: var(--text); }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog form.dlg { padding: 20px; }
+dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; position: sticky; bottom: -20px; background: var(--surface); padding: 12px 0 0; }
+
+/* misc */
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; }
+dl.kv dt { color: var(--muted); font-size: .85rem; }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+.alert { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; background: var(--warn-soft); color: var(--warn); }
+.alert.info { background: var(--info-soft); color: var(--info); }
+.entry { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; margin-bottom: 16px; }
+.entry .meta { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.gcard { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.day { font-weight: 600; margin: 14px 0 4px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50; }
+#toast.show { opacity: 1; }
+
+/* lock screen */
+.lock { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.lock .card { width: min(420px, 100%); }
+.lock p { color: var(--muted); font-size: .9rem; }
+.err { color: var(--bad); font-size: .9rem; min-height: 1.3em; }
+
+#print { display: none; }
+@media (max-width: 640px) {
+  .grid { grid-template-columns: 1fr; }
+  .brand { display: none; }
+  main { padding-top: 14px; }
+  dl.kv { grid-template-columns: 1fr; }
+  dl.kv dd { margin-bottom: 6px; }
+  th, td { padding: 6px 5px; font-size: .9rem; }
+  .card { padding: 12px; }
+}
+@media print {
+  body.printing { background: #fff; }
+  body.printing > *:not(#print) { display: none !important; }
+  body.printing #print { display: block; color: #000; background: #fff; font: 12pt/1.5 Georgia, serif; }
+  #print h1 { font-size: 16pt; } #print h2 { font-size: 13pt; margin-top: 18pt; }
+  #print .pentry { margin-bottom: 10pt; page-break-inside: avoid; }
+  #print .sign { margin-top: 48pt; text-align: center; }
+  #print .sign div { border-top: 1px solid #000; width: 60%; margin: 0 auto; padding-top: 4pt; }
+  #print table { border-collapse: collapse; } #print td, #print th { border: 1px solid #999; padding: 4pt 6pt; }
+  #print .foot { margin-top: 24pt; font-size: 9pt; color: #555; }
+}
+</style>
+</head>
+<body>
+<div id="lock" class="lock" hidden></div>
+<div id="app" hidden>
+  <header class="top">
+    <div class="brand">Consultório</div>
+    <nav class="nav" id="nav">
+      <a href="#/inicio" data-page="inicio">Início</a>
+      <a href="#/pacientes" data-page="pacientes">Pacientes</a>
+      <a href="#/agenda" data-page="agenda">Agenda</a>
+      <a href="#/financeiro" data-page="financeiro">Financeiro</a>
+      <a href="#/contatos" data-page="contatos">Contatos</a>
+      <a href="#/config" data-page="config">Configurações</a>
+    </nav>
+    <button class="btn sm" data-act="lock" title="Bloquear (os dados ficam criptografados)">Bloquear</button>
+  </header>
+  <main id="main"></main>
+</div>
+<dialog id="dlg"></dialog>
+<div id="print"></div>
+<div id="toast"></div>
+<input type="file" id="fileIn" accept=".json,application/json" hidden>
+
+<script>
+'use strict';
+/* ============================================================
+   Gerenciador de pacientes — tudo roda no navegador.
+   Os dados ficam no localStorage, criptografados (AES-GCM,
+   chave derivada da senha com PBKDF2).
+   ============================================================ */
+
+const STORE = 'duda.pacientes.vault.v1';
+const AUTOLOCK_MIN = 15;
+const NFSE_NACIONAL = 'https://www.nfse.gov.br/EmissorNacional';
+
+let db = null, key = null, salt = null;
+const ui = { pq: '', pstatus: 'ativo', agFrom: '', agTo: '', agStatus: '', finMonth: '' };
+
+/* ---------- utilidades ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+const pad = n => String(n).padStart(2, '0');
+const toISO = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const today = () => toISO(new Date());
+const parseISO = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d || 1); };
+const addDays = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); return toISO(d); };
+function addMonths(s, n) {
+  const [y, m, d] = s.split('-').map(Number);
+  const t = new Date(y, m - 1 + n, 1);
+  const last = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  t.setDate(Math.min(d, last));
+  return toISO(t);
+}
+const daysUntil = s => Math.round((parseISO(s) - parseISO(today())) / 864e5);
+const fmtD = s => s ? s.split('-').reverse().join('/') : '—';
+const WD = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+const fmtDW = s => s ? `${WD[parseISO(s).getDay()]}, ${fmtD(s)}` : '—';
+const MONTHS = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+const fmtMonth = ym => ym ? `${MONTHS[Number(ym.slice(5, 7)) - 1]} de ${ym.slice(0, 4)}` : '';
+const num = v => { const n = parseFloat(String(v ?? '').replace(/\./g, (m, i, s) => s.includes(',') ? '' : '.').replace(',', '.')); return isNaN(n) ? 0 : n; };
+const money = n => (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const sum = (arr, f) => arr.reduce((a, x) => a + num(f(x)), 0);
+const digits = s => String(s || '').replace(/\D/g, '');
+function age(n) {
+  if (!n) return null;
+  const b = parseISO(n), t = new Date();
+  let a = t.getFullYear() - b.getFullYear();
+  const m = t.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && t.getDate() < b.getDate())) a--;
+  return a;
+}
+const isMinor = p => { const a = age(p.nasc); return a !== null && a < 18; };
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2200); }
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function waLink(phone) { const d = digits(phone); if (d.length < 10) return ''; return `https://wa.me/${d.length <= 11 ? '55' + d : d}`; }
+
+/* valor por extenso (recibos) */
+const U = ['', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete', 'oito', 'nove', 'dez', 'onze', 'doze', 'treze', 'quatorze', 'quinze', 'dezesseis', 'dezessete', 'dezoito', 'dezenove'];
+const T = ['', '', 'vinte', 'trinta', 'quarenta', 'cinquenta', 'sessenta', 'setenta', 'oitenta', 'noventa'];
+const H = ['', 'cento', 'duzentos', 'trezentos', 'quatrocentos', 'quinhentos', 'seiscentos', 'setecentos', 'oitocentos', 'novecentos'];
+function ext3(n) {
+  if (n === 100) return 'cem';
+  const w = [], c = Math.floor(n / 100), r = n % 100;
+  if (c) w.push(H[c]);
+  if (r > 0 && r < 20) w.push(U[r]);
+  else if (r >= 20) w.push(T[Math.floor(r / 10)] + (r % 10 ? ' e ' + U[r % 10] : ''));
+  return w.join(' e ');
+}
+function extInt(x) {
+  const m = Math.floor(x / 1e6), k = Math.floor(x / 1000) % 1000, r = x % 1000, parts = [];
+  if (m) parts.push(m === 1 ? 'um milhão' : ext3(m) + ' milhões');
+  if (k) parts.push(k === 1 ? 'mil' : ext3(k) + ' mil');
+  if (r) parts.push(ext3(r));
+  if (parts.length < 2) return parts[0] || '';
+  const last = parts.pop();
+  return parts.join(', ') + ((r && (r <= 100 || r % 100 === 0)) ? ' e ' : ' ') + last;
+}
+function extenso(v) {
+  const n = Math.round(num(v) * 100), reais = Math.floor(n / 100), cent = n % 100, out = [];
+  if (reais) out.push(extInt(reais) + (reais === 1 ? ' real' : (reais % 1e6 === 0 ? ' de reais' : ' reais')));
+  if (cent) out.push(ext3(cent) + (cent === 1 ? ' centavo' : ' centavos'));
+  return out.join(' e ') || 'zero real';
+}
+
+/* ---------- constantes de domínio ---------- */
+const P_STATUS = { ativo: 'Ativo', pausa: 'Em pausa', alta: 'Alta', inativo: 'Inativo' };
+const S_STATUS = { agendado: 'Agendado', realizado: 'Realizado', falta: 'Falta', cancelado: 'Cancelado', reagendado: 'Reagendado' };
+const S_BADGE = { agendado: 'info', realizado: 'ok', falta: 'bad', cancelado: 'warn', reagendado: 'acc' };
+const PAY_FORMS = ['Pix', 'Dinheiro', 'Cartão de crédito', 'Cartão de débito', 'Transferência bancária', 'Boleto', 'Convênio', 'Outro'];
+const NF_STATUS = { pendente: 'A emitir', emitida: 'Emitida', cancelada: 'Cancelada' };
+const NF_BADGE = { pendente: 'warn', emitida: 'ok', cancelada: '' };
+const REC_TIPOS = ['Evolução de sessão', 'Anamnese', 'Avaliação', 'Devolutiva', 'Contato com responsáveis', 'Contato com escola/rede', 'Documento emitido', 'Encaminhamento', 'Supervisão', 'Outro'];
+const MEIOS = ['WhatsApp', 'Telefone', 'Presencial', 'Videochamada', 'E-mail'];
+const PARENTESCO = ['Mãe', 'Pai', 'Avó', 'Avô', 'Tia', 'Tio', 'Irmã(o)', 'Madrasta', 'Padrasto', 'Tutor(a) legal', 'Outro'];
+const META_STATUS = { nao: 'Não iniciada', andamento: 'Em andamento', alcancada: 'Alcançada', suspensa: 'Revista / suspensa' };
+const META_BADGE = { nao: '', andamento: 'info', alcancada: 'ok', suspensa: 'warn' };
+const STUDY = [
+  ['contexto', 'Identificação e contexto'], ['queixa', 'Queixa principal / demanda'],
+  ['historiaQueixa', 'História da queixa atual'], ['historiaVida', 'História de vida e desenvolvimento'],
+  ['familia', 'Dinâmica familiar e rede de apoio'], ['social', 'Contexto escolar, profissional e social'],
+  ['observacoes', 'Observações clínicas e comportamentais'], ['avaliacao', 'Instrumentos e avaliações realizadas'],
+  ['hipoteses', 'Hipóteses diagnósticas / diagnóstico'], ['formulacao', 'Formulação / compreensão do caso'],
+  ['referencial', 'Referencial teórico'], ['riscoProtecao', 'Fatores de risco e de proteção'],
+  ['supervisao', 'Discussão / supervisão'], ['evolucao', 'Evolução observada'],
+];
+const PLAN = [
+  { t: 'section', l: 'Estrutura' },
+  { k: 'abordagem', l: 'Abordagem terapêutica' },
+  { k: 'frequencia', l: 'Frequência das sessões', ph: 'Ex.: semanal, 50 min' },
+  { k: 'inicio', l: 'Início do plano', t: 'date' },
+  { k: 'revisao', l: 'Próxima revisão do plano', t: 'date' },
+  { k: 'duracao', l: 'Duração estimada', ph: 'Ex.: 6 meses' },
+  { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online', 'Híbrido'] },
+  { t: 'section', l: 'Objetivos e intervenções' },
+  { k: 'objetivoGeral', l: 'Objetivo geral', t: 'textarea', rows: 3 },
+  { k: 'intervencoes', l: 'Estratégias, técnicas e recursos', t: 'textarea', rows: 4 },
+  { k: 'familia', l: 'Participação dos responsáveis / família', t: 'textarea', rows: 3 },
+  { k: 'encaminhamentos', l: 'Encaminhamentos e articulação com a rede', t: 'textarea', rows: 3, ph: 'Psiquiatria, fono, escola, etc.' },
+  { k: 'criteriosAlta', l: 'Critérios de alta', t: 'textarea', rows: 3 },
+];
+
+/* ---------- dados ---------- */
+function emptyDB() {
+  return { v: 1, patients: [], sessions: [], payments: [], invoices: [], contacts: [], records: [], settings: {} };
+}
+function migrate(d) {
+  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records']) if (!Array.isArray(d[k])) d[k] = [];
+  d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL }, d.settings || {});
+  for (const p of d.patients) { p.responsaveis ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
+  return d;
+}
+const P = id => db.patients.find(p => p.id === id);
+const sessOf = id => db.sessions.filter(s => s.pacienteId === id);
+const paysOf = id => db.payments.filter(p => p.pacienteId === id);
+const invsOf = id => db.invoices.filter(i => i.pacienteId === id);
+const bySess = (a, b) => (a.data + (a.hora || '')).localeCompare(b.data + (b.hora || ''));
+const billable = s => s.status === 'realizado' || ((s.status === 'falta' || s.status === 'cancelado') && s.cobrar);
+function balance(pid) {
+  const due = sum(sessOf(pid).filter(billable), s => s.valor), paid = sum(paysOf(pid), p => p.valor);
+  return { due, paid, bal: due - paid };
+}
+const invoiceOf = payId => db.invoices.find(i => i.status !== 'cancelada' && (i.pagamentos || []).includes(payId));
+const nextSession = pid => sessOf(pid).filter(s => s.status === 'agendado' && s.data >= today()).sort(bySess)[0];
+const financeiro = p => p.responsaveis.find(r => r.financeiro) || p.responsaveis[0];
+function contactInfo(p) {
+  const cs = db.contacts.filter(c => c.pacienteId === p.id).sort((a, b) => b.data.localeCompare(a.data));
+  const last = cs[0];
+  const next = last ? (last.proximo || addMonths(last.data, 1)) : addMonths(p.inicio || (p.criadoEm || today()).slice(0, 10), 1);
+  return { last, next, dias: daysUntil(next), list: cs };
+}
+const needsContact = p => p.status === 'ativo' && isMinor(p);
+function payer(p) {
+  if (isMinor(p) && p.responsaveis.length) { const r = financeiro(p); return { nome: r.nome, cpf: r.cpf, endereco: r.endereco || p.endereco, email: r.email }; }
+  return { nome: p.nome, cpf: p.cpf, endereco: p.endereco, email: p.email };
+}
+
+/* ---------- criptografia ---------- */
+const enc = new TextEncoder(), dec = new TextDecoder();
+function b64e(buf) { const b = new Uint8Array(buf); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); }
+function b64d(s) { const bin = atob(s), b = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return b; }
+async function deriveKey(pw, saltBytes) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: saltBytes, iterations: 310000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function sealVault(data, k, s) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, enc.encode(JSON.stringify(data)));
+  return { app: 'duda-pacientes', v: 1, salt: b64e(s), iv: b64e(iv), ct: b64e(ct) };
+}
+async function openVault(vault, pw) {
+  const s = b64d(vault.salt), k = await deriveKey(pw, s);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(vault.iv) }, k, b64d(vault.ct));
+  return { data: JSON.parse(dec.decode(pt)), key: k, salt: s };
+}
+async function persist() {
+  const vault = await sealVault(db, key, salt);
+  try { localStorage.setItem(STORE, JSON.stringify(vault)); }
+  catch (e) { alert('Não foi possível salvar: o armazenamento do navegador está cheio ou bloqueado. Faça um backup agora em Configurações.'); throw e; }
+}
+async function commit(msg) {
+  db.atualizadoEm = new Date().toISOString();
+  await persist();
+  render();
+  if (msg) toast(msg);
+}
+
+/* ---------- tela de bloqueio ---------- */
+function showLock(reason) {
+  db = null; key = null; salt = null;
+  const dlg = $('#dlg'); if (dlg.open) dlg.close();
+  $('#main').innerHTML = '';
+  $('#app').hidden = true;
+  const L = $('#lock'); L.hidden = false;
+  if (!window.crypto?.subtle) {
+    L.innerHTML = `<div class="card"><h2>Navegador sem suporte</h2><p>Este navegador não oferece criptografia (Web Crypto). Abra o arquivo no Chrome, Edge, Firefox ou Safari atualizados.</p></div>`;
+    return;
+  }
+  const has = !!localStorage.getItem(STORE);
+  L.innerHTML = has ? `
+    <form class="card" id="unlockForm">
+      <h2>Consultório — Pacientes</h2>
+      <p>${reason ? esc(reason) + ' ' : ''}Digite sua senha para abrir os dados.</p>
+      <label class="fld"><span>Senha</span><input type="password" name="pw" autocomplete="current-password" required autofocus></label>
+      <div class="err" id="lockErr"></div>
+      <button class="btn primary" style="width:100%">Entrar</button>
+    </form>` : `
+    <form class="card" id="setupForm">
+      <h2>Bem-vinda! Vamos começar</h2>
+      <p>Crie uma senha para proteger os dados dos pacientes. Tudo fica guardado <b>somente neste computador</b>, criptografado com essa senha.</p>
+      <p><b>Atenção:</b> não há como recuperar a senha. Se esquecê-la, os dados não poderão ser abertos. Guarde-a em lugar seguro e faça backups em Configurações.</p>
+      <div class="grid">
+        <label class="fld full"><span>Nova senha (mín. 6 caracteres)</span><input type="password" name="pw1" minlength="6" autocomplete="new-password" required autofocus></label>
+        <label class="fld full"><span>Repita a senha</span><input type="password" name="pw2" minlength="6" autocomplete="new-password" required></label>
+      </div>
+      <div class="err" id="lockErr"></div>
+      <button class="btn primary" style="width:100%">Criar senha e começar</button>
+      <p style="margin-top:14px">Já tem um backup? <a href="#" data-act="setup-import">Restaurar backup</a></p>
+    </form>`;
+  $('input', L)?.focus();
+}
+let pendingImport = null;
+document.addEventListener('submit', async e => {
+  const f = e.target;
+  if (f.id === 'unlockForm') {
+    e.preventDefault();
+    const btn = $('button', f); btn.disabled = true; $('#lockErr').textContent = '';
+    try {
+      const r = await openVault(JSON.parse(localStorage.getItem(STORE)), f.pw.value);
+      db = migrate(r.data); key = r.key; salt = r.salt; start();
+    } catch { $('#lockErr').textContent = 'Senha incorreta.'; btn.disabled = false; f.pw.select(); }
+  } else if (f.id === 'setupForm') {
+    e.preventDefault();
+    if (f.pw1.value !== f.pw2.value) { $('#lockErr').textContent = 'As senhas não conferem.'; return; }
+    salt = crypto.getRandomValues(new Uint8Array(16));
+    key = await deriveKey(f.pw1.value, salt);
+    db = migrate(pendingImport || emptyDB()); pendingImport = null;
+    await persist(); start();
+    location.hash = db.settings.nome ? '#/inicio' : '#/config';
+    toast(db.patients.length ? 'Backup restaurado.' : 'Tudo pronto! Preencha seus dados profissionais.');
+  } else if (f.dataset.submit) {
+    e.preventDefault();
+    await actions[f.dataset.submit]?.(f.dataset, f);
+  }
+});
+
+function start() {
+  $('#lock').hidden = true; $('#lock').innerHTML = '';
+  $('#app').hidden = false;
+  lastActive = Date.now();
+  render();
+}
+let lastActive = Date.now();
+['click', 'keydown', 'mousemove', 'touchstart'].forEach(ev => document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true }));
+setInterval(() => { if (db && Date.now() - lastActive > AUTOLOCK_MIN * 60000) showLock(`Bloqueado após ${AUTOLOCK_MIN} minutos sem uso.`); }, 30000);
+
+/* ---------- formulários ---------- */
+function optsHTML(opts, v) {
+  return opts.map(o => { const [ov, ol] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(ov)}"${String(v ?? '') === String(ov) ? ' selected' : ''}>${esc(ol)}</option>`; }).join('');
+}
+function fieldHTML(f, v) {
+  if (f.t === 'section') return `<h3 class="full sec">${esc(f.l)}</h3>`;
+  const full = (f.w === 'full' || f.t === 'textarea') ? ' full' : '';
+  const req = f.req ? ' required' : '';
+  const lab = `<span>${esc(f.l)}${f.req ? ' *' : ''}</span>`;
+  const hint = f.hint ? `<small>${esc(f.hint)}</small>` : '';
+  switch (f.t) {
+    case 'textarea': return `<label class="fld${full}">${lab}<textarea name="${f.k}" rows="${f.rows || 4}"${req} placeholder="${esc(f.ph || '')}">${esc(v ?? '')}</textarea>${hint}</label>`;
+    case 'select': return `<label class="fld${full}">${lab}<select name="${f.k}"${req}>${f.empty ? '<option value="">—</option>' : ''}${optsHTML(f.opts, v)}</select>${hint}</label>`;
+    case 'checkbox': return `<label class="check full"><input type="checkbox" name="${f.k}"${v ? ' checked' : ''}> ${esc(f.l)}</label>`;
+    case 'checks': return `<div class="fld full">${lab}<div class="checks">${f.opts.length ? f.opts.map(([ov, ol]) => `<label class="check"><input type="checkbox" name="${f.k}" value="${esc(ov)}"${(v || []).includes(ov) ? ' checked' : ''}> ${esc(ol)}</label>`).join('') : '<span class="muted">Nenhum item disponível.</span>'}</div>${hint}</div>`;
+    case 'money': return `<label class="fld${full}">${lab}<input name="${f.k}" inputmode="decimal" placeholder="0,00" value="${v === '' || v == null ? '' : esc(String(v).replace('.', ','))}"${req}>${hint}</label>`;
+    default: return `<label class="fld${full}">${lab}<input type="${f.t || 'text'}" name="${f.k}" value="${esc(v ?? '')}"${req}${f.t === 'number' ? ' step="any"' : ''} placeholder="${esc(f.ph || '')}">${hint}</label>`;
+  }
+}
+function readForm(form, fields) {
+  const o = {};
+  for (const f of fields) {
+    if (!f.k) continue;
+    if (f.t === 'checkbox') o[f.k] = !!form.querySelector(`[name="${f.k}"]`)?.checked;
+    else if (f.t === 'checks') o[f.k] = $$(`[name="${f.k}"]:checked`, form).map(e => e.value);
+    else { const v = (form.elements[f.k]?.value ?? '').trim(); o[f.k] = f.t === 'money' ? (v === '' ? '' : num(v)) : v; }
+  }
+  return o;
+}
+function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 'Salvar' }) {
+  const dlg = $('#dlg');
+  dlg.innerHTML = `<form class="dlg" novalidate><h2>${esc(title)}</h2>${intro}<div class="grid">${fields.map(f => fieldHTML(f, values[f.k])).join('')}</div>
+    <div class="foot"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">${esc(saveLabel)}</button></div></form>`;
+  const form = $('form', dlg);
+  $('[data-close]', form).onclick = () => dlg.close();
+  form.onsubmit = async e => {
+    e.preventDefault();
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const r = await onSave(readForm(form, fields), form);
+    if (r !== false) dlg.close();
+  };
+  dlg.showModal();
+  $('input:not([type=checkbox]),select,textarea', form)?.focus();
+}
+function pickPatient(title, cb, filter = p => p.status !== 'inativo') {
+  const list = db.patients.filter(filter).sort((a, b) => a.nome.localeCompare(b.nome));
+  if (!list.length) { alert('Cadastre um paciente primeiro.'); return; }
+  openForm({ title, saveLabel: 'Continuar', fields: [{ k: 'pid', l: 'Paciente', t: 'select', req: true, empty: true, opts: list.map(p => [p.id, p.nome]) }],
+    onSave: v => { if (!v.pid) return false; setTimeout(() => cb(v.pid), 0); } });
+}
+
+/* ---------- impressão ---------- */
+function printDoc(html) {
+  $('#print').innerHTML = html;
+  document.body.classList.add('printing');
+  setTimeout(() => { window.print(); document.body.classList.remove('printing'); }, 50);
+}
+function profHeader() {
+  const s = db.settings;
+  return `<div><b>${esc(s.nome || 'Psicóloga')}</b>${s.crp ? ` — CRP ${esc(s.crp)}` : ''}<br><span style="font-size:10pt">${[s.endereco, s.cidade, s.telefone, s.email].filter(Boolean).map(esc).join(' · ')}</span></div><hr>`;
+}
+const confidential = () => `<div class="foot">Documento sigiloso — uso exclusivo da profissional (Código de Ética do Psicólogo e Resolução CFP nº 01/2009). Impresso em ${fmtD(today())}.</div>`;
+function patientIdHTML(p) {
+  const rs = p.responsaveis.map(r => `${esc(r.nome)} (${esc(r.parentesco || 'responsável')})${r.telefone ? ' — ' + esc(r.telefone) : ''}`).join('<br>');
+  return `<table><tr><th>Paciente</th><td>${esc(p.nome)}</td></tr>
+    <tr><th>Nascimento</th><td>${fmtD(p.nasc)}${p.nasc ? ` (${age(p.nasc)} anos)` : ''}</td></tr>
+    ${p.cpf ? `<tr><th>CPF</th><td>${esc(p.cpf)}</td></tr>` : ''}
+    ${rs ? `<tr><th>Responsáveis</th><td>${rs}</td></tr>` : ''}
+    <tr><th>Início do acompanhamento</th><td>${fmtD(p.inicio)}</td></tr></table>`;
+}
+
+/* ---------- ações ---------- */
+const actions = {};
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) {
+    if (!e.target.closest('details.menu')) $$('details.menu[open]').forEach(d => d.open = false);
+    return;
+  }
+  e.preventDefault();
+  const m = b.closest('details.menu'); if (m) m.open = false;
+  await actions[b.dataset.act]?.(b.dataset, b);
+});
+document.addEventListener('change', async e => {
+  const el = e.target;
+  if (el.dataset.change) await actions[el.dataset.change]?.(el.dataset, el);
+  if (el.form?.dataset.autosave) await actions[el.form.dataset.autosave]?.(el.form.dataset, el.form, true);
+});
+document.addEventListener('input', e => {
+  const el = e.target;
+  if (el.dataset.ui) { ui[el.dataset.ui] = el.value; if (el.dataset.soft) refreshList(); else render(); }
+});
+// menus "⋯": posicionados em relação à janela para não serem cortados por tabelas com rolagem
+function placeMenu(d) {
+  if (!d.open) return;
+  const r = $('summary', d).getBoundingClientRect(), it = $('.items', d);
+  it.style.right = Math.max(8, innerWidth - r.right) + 'px';
+  it.style.top = (r.bottom + 4 + it.offsetHeight > innerHeight ? Math.max(8, r.top - 4 - it.offsetHeight) : r.bottom + 4) + 'px';
+}
+document.addEventListener('click', e => { const d = e.target.closest('details.menu'); if (d && e.target.closest('summary')) { $$('details.menu[open]').forEach(x => { if (x !== d) x.open = false; }); requestAnimationFrame(() => placeMenu(d)); } });
+['scroll', 'resize'].forEach(ev => window.addEventListener(ev, () => $$('details.menu[open]').forEach(placeMenu), true));
+let listRenderer = null;
+function refreshList() { if (listRenderer) $('#list').innerHTML = listRenderer(); }
+
+actions.lock = () => showLock();
+
+/* pacientes */
+function patientFields() {
+  return [
+    { t: 'section', l: 'Identificação' },
+    { k: 'nome', l: 'Nome completo', req: true, w: 'full' },
+    { k: 'nomeSocial', l: 'Nome social / como prefere ser chamado(a)' },
+    { k: 'nasc', l: 'Data de nascimento', t: 'date', hint: 'Menores de 18 anos ganham campos de responsáveis e lembrete mensal de contato.' },
+    { k: 'cpf', l: 'CPF' }, { k: 'rg', l: 'RG' },
+    { k: 'genero', l: 'Gênero' }, { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel' },
+    { k: 'email', l: 'E-mail', t: 'email' }, { k: 'ocupacao', l: 'Escola / série ou ocupação' },
+    { k: 'endereco', l: 'Endereço', w: 'full' },
+    { k: 'emergencia', l: 'Contato de emergência', w: 'full' },
+    { t: 'section', l: 'Atendimento' },
+    { k: 'inicio', l: 'Início do acompanhamento', t: 'date' },
+    { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(P_STATUS) },
+    { k: 'valor', l: 'Valor da sessão (R$)', t: 'money' },
+    { k: 'frequencia', l: 'Frequência', t: 'select', empty: true, opts: ['Semanal', 'Quinzenal', 'Mensal', 'Duas vezes por semana', 'Outra'] },
+    { k: 'diaHorario', l: 'Dia e horário habitual', ph: 'Ex.: terças, 15h' },
+    { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online', 'Híbrido'] },
+    { k: 'encaminhadoPor', l: 'Encaminhado(a) por' },
+    { k: 'convenio', l: 'Convênio / particular', ph: 'Particular' },
+    { k: 'cobrarFalta', l: 'Cobrar faltas sem aviso prévio (padrão para este paciente)', t: 'checkbox' },
+    { k: 'obs', l: 'Observações gerais', t: 'textarea', rows: 3 },
+  ];
+}
+actions['new-patient'] = () => openForm({
+  title: 'Novo paciente', fields: patientFields(),
+  values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true },
+  onSave: async v => {
+    const p = { id: uid(), ...v, responsaveis: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
+    db.patients.push(p);
+    location.hash = `#/p/${p.id}/dados`;
+    await commit(isMinor(p) ? 'Paciente cadastrado. Agora adicione os responsáveis.' : 'Paciente cadastrado.');
+  },
+});
+actions['edit-patient'] = ({ id }) => { const p = P(id); openForm({ title: 'Editar paciente', fields: patientFields(), values: p, onSave: async v => { Object.assign(p, v); await commit('Dados atualizados.'); } }); };
+actions['del-patient'] = async ({ id }) => {
+  const p = P(id);
+  if (prompt(`Excluir ${p.nome} e TODOS os registros (atendimentos, pagamentos, notas, prontuário)? Esta ação não pode ser desfeita.\n\nPara confirmar, digite EXCLUIR:`) !== 'EXCLUIR') return;
+  db.patients = db.patients.filter(x => x.id !== id);
+  for (const k of ['sessions', 'payments', 'invoices', 'contacts', 'records']) db[k] = db[k].filter(x => x.pacienteId !== id);
+  location.hash = '#/pacientes';
+  await commit('Paciente excluído.');
+};
+
+/* responsáveis */
+const guardianFields = () => [
+  { k: 'nome', l: 'Nome completo', req: true, w: 'full' },
+  { k: 'parentesco', l: 'Parentesco', t: 'select', opts: PARENTESCO },
+  { k: 'cpf', l: 'CPF' }, { k: 'rg', l: 'RG' },
+  { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel' }, { k: 'email', l: 'E-mail', t: 'email' },
+  { k: 'profissao', l: 'Profissão' },
+  { k: 'endereco', l: 'Endereço (se diferente do paciente)', w: 'full' },
+  { k: 'financeiro', l: 'Responsável financeiro (pagador / tomador da nota fiscal)', t: 'checkbox' },
+  { k: 'guarda', l: 'Detém a guarda / autoriza o atendimento', t: 'checkbox' },
+  { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
+];
+function fixFinanceiro(p, r) { if (r.financeiro) p.responsaveis.forEach(x => { if (x !== r) x.financeiro = false; }); }
+actions['new-guardian'] = ({ pid }) => { const p = P(pid); openForm({ title: 'Novo responsável', fields: guardianFields(), values: { financeiro: !p.responsaveis.length, guarda: true }, onSave: async v => { const r = { id: uid(), ...v }; p.responsaveis.push(r); fixFinanceiro(p, r); await commit('Responsável adicionado.'); } }); };
+actions['edit-guardian'] = ({ pid, id }) => { const p = P(pid), r = p.responsaveis.find(x => x.id === id); openForm({ title: 'Editar responsável', fields: guardianFields(), values: r, onSave: async v => { Object.assign(r, v); fixFinanceiro(p, r); await commit('Responsável atualizado.'); } }); };
+actions['del-guardian'] = async ({ pid, id }) => { const p = P(pid); if (!confirm('Remover este responsável?')) return; p.responsaveis = p.responsaveis.filter(x => x.id !== id); await commit(); };
+
+/* atendimentos */
+function sessionFields(isNew) {
+  const f = [
+    { k: 'data', l: 'Data', t: 'date', req: true }, { k: 'hora', l: 'Horário', t: 'time' },
+    { k: 'duracao', l: 'Duração (min)', t: 'number' }, { k: 'valor', l: 'Valor (R$)', t: 'money' },
+    { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(S_STATUS) },
+    { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online'] },
+    { k: 'cobrar', l: 'Cobrar mesmo sendo falta/cancelamento', t: 'checkbox' },
+    { k: 'motivo', l: 'Motivo (falta, cancelamento ou reagendamento)', w: 'full' },
+    { k: 'obs', l: 'Observações administrativas', t: 'textarea', rows: 2, hint: 'Anotações clínicas vão no prontuário.' },
+  ];
+  if (isNew) f.push({ k: 'repetir', l: 'Repetir semanalmente (nº de semanas adicionais)', t: 'number', hint: 'Ex.: 7 cria esta sessão e mais 7, uma por semana.' });
+  return f;
+}
+function newSession(pid, preset = {}) {
+  const p = P(pid);
+  openForm({
+    title: `Agendar — ${p.nome}`, fields: sessionFields(true),
+    values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
+    onSave: async v => {
+      const n = Math.max(0, Math.min(104, parseInt(v.repetir) || 0)); delete v.repetir;
+      for (let i = 0; i <= n; i++) db.sessions.push({ id: uid(), pacienteId: pid, ...v, data: addDays(v.data, 7 * i), status: i ? 'agendado' : v.status });
+      await commit(n ? `${n + 1} sessões agendadas.` : 'Sessão salva.');
+    },
+  });
+}
+actions['new-session'] = ({ pid }) => pid ? newSession(pid) : pickPatient('Agendar sessão', newSession);
+const S = id => db.sessions.find(s => s.id === id);
+actions['edit-session'] = ({ id }) => { const s = S(id); openForm({ title: `Editar sessão — ${P(s.pacienteId).nome}`, fields: sessionFields(false), values: s, onSave: async v => { Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
+actions['del-session'] = async ({ id }) => { if (!confirm('Excluir este atendimento? (Para faltas e cancelamentos, prefira mudar a situação e manter o histórico.)')) return; db.sessions = db.sessions.filter(s => s.id !== id); await commit('Sessão excluída.'); };
+actions['sess-done'] = async ({ id }) => { S(id).status = 'realizado'; await commit('Marcada como realizada.'); };
+actions['sess-miss'] = ({ id }) => {
+  const s = S(id), p = P(s.pacienteId);
+  openForm({ title: 'Registrar falta', fields: [
+    { k: 'aviso', l: 'Tipo de falta', t: 'select', opts: ['Sem aviso', 'Avisou com pouca antecedência', 'Justificada (saúde, etc.)'] },
+    { k: 'motivo', l: 'Motivo / observação', w: 'full' },
+    { k: 'cobrar', l: 'Cobrar esta sessão', t: 'checkbox' }],
+    values: { cobrar: !!p.cobrarFalta, aviso: 'Sem aviso' },
+    onSave: async v => { Object.assign(s, { status: 'falta', cobrar: v.cobrar, motivo: [v.aviso, v.motivo].filter(Boolean).join(' — ') }); await commit('Falta registrada.'); } });
+};
+actions['sess-cancel'] = ({ id }) => {
+  const s = S(id);
+  openForm({ title: 'Cancelar sessão', fields: [
+    { k: 'por', l: 'Cancelado por', t: 'select', opts: ['Paciente / responsável', 'Profissional', 'Feriado / recesso', 'Outro'] },
+    { k: 'motivo', l: 'Motivo', w: 'full' },
+    { k: 'cobrar', l: 'Cobrar esta sessão (cancelamento fora do prazo combinado)', t: 'checkbox' }],
+    onSave: async v => { Object.assign(s, { status: 'cancelado', cobrar: v.cobrar, motivo: [v.por, v.motivo].filter(Boolean).join(' — ') }); await commit('Cancelamento registrado.'); } });
+};
+actions['sess-resched'] = ({ id }) => {
+  const s = S(id);
+  openForm({ title: 'Reagendar sessão', intro: `<p class="muted">Original: ${fmtDW(s.data)} ${esc(s.hora || '')}. A sessão original fica no histórico como “reagendada” e uma nova é criada.</p>`,
+    fields: [{ k: 'data', l: 'Nova data', t: 'date', req: true }, { k: 'hora', l: 'Novo horário', t: 'time' },
+      { k: 'por', l: 'Solicitado por', t: 'select', opts: ['Paciente / responsável', 'Profissional'] }, { k: 'motivo', l: 'Motivo', w: 'full' }],
+    values: { data: addDays(s.data, 1), hora: s.hora },
+    onSave: async v => {
+      const nova = { ...s, id: uid(), data: v.data, hora: v.hora, status: 'agendado', motivo: '', cobrar: false, reagendadoDe: s.id };
+      delete nova.reagendadoPara;
+      Object.assign(s, { status: 'reagendado', cobrar: false, reagendadoPara: { data: v.data, hora: v.hora, id: nova.id }, motivo: [v.por, v.motivo].filter(Boolean).join(' — ') });
+      db.sessions.push(nova);
+      await commit(`Reagendada para ${fmtD(v.data)}.`);
+    } });
+};
+
+/* pagamentos */
+function paymentFields() {
+  return [
+    { k: 'data', l: 'Data do pagamento', t: 'date', req: true }, { k: 'valor', l: 'Valor (R$)', t: 'money', req: true },
+    { k: 'forma', l: 'Forma de pagamento', t: 'select', opts: PAY_FORMS }, { k: 'parcelas', l: 'Parcelas (cartão)', t: 'number' },
+    { k: 'referencia', l: 'Referente a', w: 'full', ph: 'Ex.: sessões de setembro (02, 09, 16 e 23/09)' },
+    { k: 'pagador', l: 'Pagador (nome)' }, { k: 'pagadorCpf', l: 'CPF do pagador' },
+    { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
+  ];
+}
+function suggestReference(pid) {
+  const bal = balance(pid);
+  if (bal.bal <= 0) return { valor: '', referencia: '' };
+  // sessões cobráveis mais recentes que somam o saldo em aberto
+  const ss = sessOf(pid).filter(billable).sort(bySess).reverse(); let acc = 0; const pick = [];
+  for (const s of ss) { if (acc >= bal.bal - 0.005) break; acc += num(s.valor); pick.unshift(s); }
+  return { valor: Math.round(bal.bal * 100) / 100, referencia: pick.length ? 'Sessões de ' + pick.map(s => fmtD(s.data).slice(0, 5)).join(', ') : '' };
+}
+function newPayment(pid) {
+  const p = P(pid), pay = payer(p), sug = suggestReference(pid);
+  openForm({ title: `Pagamento — ${p.nome}`, fields: paymentFields(),
+    values: { data: today(), forma: 'Pix', pagador: pay.nome, pagadorCpf: pay.cpf, ...sug },
+    intro: sug.valor ? `<div class="alert info">Saldo em aberto: <b>${money(sug.valor)}</b>. Valor e referência foram sugeridos.</div>` : '',
+    onSave: async v => { if (!v.valor) { alert('Informe o valor.'); return false; } db.payments.push({ id: uid(), pacienteId: pid, ...v }); await commit('Pagamento registrado.'); } });
+}
+actions['new-payment'] = ({ pid }) => pid ? newPayment(pid) : pickPatient('Registrar pagamento', newPayment);
+const PAY = id => db.payments.find(x => x.id === id);
+actions['edit-payment'] = ({ id }) => { const x = PAY(id); openForm({ title: 'Editar pagamento', fields: paymentFields(), values: x, onSave: async v => { Object.assign(x, v); await commit('Pagamento atualizado.'); } }); };
+actions['del-payment'] = async ({ id }) => {
+  if (!confirm('Excluir este pagamento?')) return;
+  db.payments = db.payments.filter(x => x.id !== id);
+  db.invoices.forEach(i => { i.pagamentos = (i.pagamentos || []).filter(x => x !== id); });
+  await commit('Pagamento excluído.');
+};
+actions.receipt = ({ id }) => {
+  const x = PAY(id), p = P(x.pacienteId), s = db.settings;
+  const benef = x.pagador && x.pagador !== p.nome ? `, referente a atendimento psicológico prestado a <b>${esc(p.nome)}</b>${p.cpf ? ` (CPF ${esc(p.cpf)})` : ''}` : ', referente a atendimento psicológico';
+  printDoc(`${profHeader()}<h1 style="text-align:center">RECIBO</h1><p style="text-align:right"><b>${money(x.valor)}</b></p>
+    <p>Recebi de <b>${esc(x.pagador || p.nome)}</b>${x.pagadorCpf ? `, CPF ${esc(x.pagadorCpf)}` : ''}, a importância de <b>${money(x.valor)}</b> (${esc(extenso(x.valor))})${benef}${x.referencia ? ` — ${esc(x.referencia)}` : ''}, pago via ${esc(x.forma || '—')} em ${fmtD(x.data)}.</p>
+    <p>Para clareza, firmo o presente.</p><p>${esc(s.cidade || '')}${s.cidade ? ', ' : ''}${fmtD(today())}.</p>
+    <div class="sign"><div>${esc(s.nome || '')}<br>Psicóloga${s.crp ? ' — CRP ' + esc(s.crp) : ''}${s.cpf ? '<br>CPF ' + esc(s.cpf) : ''}</div></div>`);
+};
+
+/* notas fiscais */
+function invoiceFields(p, current) {
+  const avail = paysOf(p.id).filter(x => !invoiceOf(x.id) || (current && (current.pagamentos || []).includes(x.id))).sort((a, b) => b.data.localeCompare(a.data));
+  return [
+    { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(NF_STATUS) },
+    { k: 'numero', l: 'Número da NF', hint: 'Preencha depois de emitir no portal da prefeitura.' },
+    { k: 'dataEmissao', l: 'Data de emissão', t: 'date' }, { k: 'competencia', l: 'Competência (mês)', t: 'month' },
+    { k: 'pagamentos', l: 'Pagamentos incluídos nesta nota', t: 'checks', opts: avail.map(x => [x.id, `${fmtD(x.data)} — ${money(x.valor)} — ${x.forma || ''}${x.referencia ? ' — ' + x.referencia : ''}`]) },
+    { k: 'valor', l: 'Valor da nota (R$)', t: 'money', hint: 'Deixe em branco para somar os pagamentos marcados.' },
+    { k: 'codigo', l: 'Código de serviço / CNAE', ph: 'Ex.: 04.16 – Psicologia' },
+    { t: 'section', l: 'Tomador (quem recebe a nota)' },
+    { k: 'tomadorNome', l: 'Nome', req: true }, { k: 'tomadorCpf', l: 'CPF / CNPJ' },
+    { k: 'tomadorEmail', l: 'E-mail', t: 'email' }, { k: 'tomadorEndereco', l: 'Endereço' },
+    { k: 'descricao', l: 'Descrição do serviço', t: 'textarea', rows: 3 },
+    { k: 'link', l: 'Link / chave de acesso da NF', w: 'full' },
+    { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
+  ];
+}
+function saveInvoice(p, inv, v) {
+  if (v.valor === '') v.valor = Math.round(sum(v.pagamentos.map(PAY), x => x.valor) * 100) / 100;
+  Object.assign(inv, v);
+}
+function newInvoice(pid, payId) {
+  const p = P(pid), pay = payer(p), first = payId ? PAY(payId) : null;
+  const comp = (first?.data || today()).slice(0, 7);
+  openForm({ title: `Nota fiscal — ${p.nome}`, fields: invoiceFields(p),
+    values: { status: 'pendente', competencia: comp, pagamentos: payId ? [payId] : [], tomadorNome: pay.nome, tomadorCpf: pay.cpf, tomadorEmail: pay.email, tomadorEndereco: pay.endereco,
+      descricao: `${db.settings.descricaoNF}${pay.nome !== p.nome ? ` prestados a ${p.nome}` : ''}, referente a ${fmtMonth(comp)}.` },
+    onSave: async v => { const inv = { id: uid(), pacienteId: pid }; saveInvoice(p, inv, v); db.invoices.push(inv); await commit(v.status === 'emitida' ? 'Nota registrada.' : 'Nota salva como “a emitir”.'); } });
+}
+actions['new-invoice'] = ({ pid, pay }) => pid ? newInvoice(pid, pay) : pickPatient('Nova nota fiscal', id => newInvoice(id), () => true);
+const INV = id => db.invoices.find(x => x.id === id);
+actions['edit-invoice'] = ({ id }) => { const inv = INV(id), p = P(inv.pacienteId); openForm({ title: 'Editar nota fiscal', fields: invoiceFields(p, inv), values: inv, onSave: async v => { saveInvoice(p, inv, v); await commit('Nota atualizada.'); } }); };
+actions['del-invoice'] = async ({ id }) => { if (!confirm('Excluir o registro desta nota? (Se ela foi emitida, prefira marcar como “cancelada”.)')) return; db.invoices = db.invoices.filter(x => x.id !== id); await commit(); };
+actions['copy-invoice'] = async ({ id }) => {
+  const i = INV(id);
+  const txt = [`Tomador: ${i.tomadorNome}`, i.tomadorCpf && `CPF/CNPJ: ${i.tomadorCpf}`, i.tomadorEmail && `E-mail: ${i.tomadorEmail}`, i.tomadorEndereco && `Endereço: ${i.tomadorEndereco}`,
+    `Valor: ${money(i.valor)}`, i.competencia && `Competência: ${fmtMonth(i.competencia)}`, i.codigo && `Código do serviço: ${i.codigo}`, `Descrição: ${i.descricao || ''}`].filter(Boolean).join('\n');
+  try { await navigator.clipboard.writeText(txt); toast('Dados copiados. Cole no emissor de NFS-e.'); }
+  catch { prompt('Copie os dados abaixo:', txt.replace(/\n/g, ' | ')); }
+};
+actions['mark-issued'] = ({ id }) => {
+  const inv = INV(id);
+  openForm({ title: 'Marcar nota como emitida', fields: [{ k: 'numero', l: 'Número da NF', req: true }, { k: 'dataEmissao', l: 'Data de emissão', t: 'date', req: true }, { k: 'link', l: 'Link / chave de acesso', w: 'full' }],
+    values: { dataEmissao: today(), numero: inv.numero, link: inv.link },
+    onSave: async v => { Object.assign(inv, v, { status: 'emitida' }); await commit('Nota marcada como emitida.'); } });
+};
+
+/* contatos com responsáveis */
+function contactFields(p) {
+  return [
+    { k: 'data', l: 'Data do contato', t: 'date', req: true },
+    { k: 'meio', l: 'Meio', t: 'select', opts: MEIOS },
+    { k: 'responsavel', l: 'Com quem', t: 'select', opts: [...p.responsaveis.map(r => r.nome), 'Ambos / família', 'Outro'] },
+    { k: 'proximo', l: 'Próximo contato', t: 'date', hint: 'Sugerido: 1 mês depois.' },
+    { k: 'resumo', l: 'Resumo da conversa', t: 'textarea', rows: 4, hint: 'Registre só o necessário. Se tiver conteúdo clínico, marque para copiar ao prontuário.' },
+    { k: 'noProntuario', l: 'Registrar também no prontuário', t: 'checkbox' },
+  ];
+}
+actions['new-contact'] = ({ pid }) => {
+  const p = P(pid);
+  openForm({ title: `Contato com responsáveis — ${p.nome}`, fields: contactFields(p), values: { data: today(), proximo: addMonths(today(), 1), meio: 'WhatsApp', noProntuario: true },
+    onSave: async v => {
+      const c = { id: uid(), pacienteId: pid, ...v }; db.contacts.push(c);
+      if (v.noProntuario && v.resumo) db.records.push({ id: uid(), pacienteId: pid, data: v.data, tipo: 'Contato com responsáveis', texto: `${v.meio} com ${v.responsavel}: ${v.resumo}`, criadoEm: new Date().toISOString() });
+      await commit(`Contato registrado. Próximo: ${fmtD(v.proximo || addMonths(v.data, 1))}.`);
+    } });
+};
+actions['edit-contact'] = ({ id }) => { const c = db.contacts.find(x => x.id === id), p = P(c.pacienteId); openForm({ title: 'Editar contato', fields: contactFields(p).filter(f => f.k !== 'noProntuario'), values: c, onSave: async v => { Object.assign(c, v); await commit(); } }); };
+actions['del-contact'] = async ({ id }) => { if (!confirm('Excluir este registro de contato?')) return; db.contacts = db.contacts.filter(x => x.id !== id); await commit(); };
+
+/* prontuário */
+function recordFields(p) {
+  const ss = sessOf(p.id).filter(s => s.status === 'realizado' || s.status === 'falta').sort(bySess).reverse();
+  return [
+    { k: 'data', l: 'Data', t: 'date', req: true }, { k: 'tipo', l: 'Tipo de registro', t: 'select', opts: REC_TIPOS },
+    { k: 'sessaoId', l: 'Sessão vinculada', t: 'select', empty: true, opts: ss.map(s => [s.id, `${fmtD(s.data)} ${s.hora || ''} — ${S_STATUS[s.status]}`]), w: 'full' },
+    { k: 'texto', l: 'Registro', t: 'textarea', rows: 12, req: true, ph: 'Demanda trabalhada, intervenções, observações, encaminhamentos…' },
+  ];
+}
+actions['new-record'] = ({ pid, sess }) => {
+  const p = P(pid), s = sess ? S(sess) : null;
+  openForm({ title: `Prontuário — ${p.nome}`, fields: recordFields(p), values: { data: s?.data || today(), tipo: 'Evolução de sessão', sessaoId: sess || '' },
+    onSave: async v => { if (!v.texto) { alert('Escreva o registro.'); return false; } db.records.push({ id: uid(), pacienteId: pid, ...v, criadoEm: new Date().toISOString() }); if (location.hash !== `#/p/${pid}/prontuario`) location.hash = `#/p/${pid}/prontuario`; await commit('Registro salvo no prontuário.'); } });
+};
+actions['edit-record'] = ({ id }) => { const r = db.records.find(x => x.id === id), p = P(r.pacienteId); openForm({ title: 'Editar registro', fields: recordFields(p), values: r, onSave: async v => { Object.assign(r, v, { editadoEm: new Date().toISOString() }); await commit('Registro atualizado.'); } }); };
+actions['del-record'] = async ({ id }) => { if (!confirm('Excluir este registro do prontuário?')) return; db.records = db.records.filter(x => x.id !== id); await commit(); };
+actions['print-records'] = ({ pid }) => {
+  const p = P(pid), rs = db.records.filter(r => r.pacienteId === pid).sort((a, b) => a.data.localeCompare(b.data));
+  printDoc(`${profHeader()}<h1>Prontuário psicológico</h1>${patientIdHTML(p)}<h2>Registros</h2>
+    ${rs.map(r => `<div class="pentry"><b>${fmtD(r.data)} — ${esc(r.tipo)}</b><div class="pre">${esc(r.texto)}</div></div>`).join('') || '<p>Sem registros.</p>'}${confidential()}`);
+};
+
+/* estudo de caso & plano */
+async function saveStudy({ pid }, form, silent) {
+  const p = P(pid); if (!p) return;
+  p.estudo = { ...readForm(form, STUDY.map(([k]) => ({ k }))), atualizadoEm: new Date().toISOString() };
+  await persist();
+  const el = $('#savedAt'); if (el) el.textContent = 'Salvo às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (!silent) toast('Estudo de caso salvo.');
+}
+actions['save-study'] = saveStudy;
+actions['print-study'] = ({ pid }) => {
+  const p = P(pid), e = p.estudo;
+  printDoc(`${profHeader()}<h1>Estudo de caso</h1>${patientIdHTML(p)}${STUDY.filter(([k]) => e[k]).map(([k, l]) => `<h2>${esc(l)}</h2><div class="pre">${esc(e[k])}</div>`).join('')}${confidential()}`);
+};
+async function savePlan({ pid }, form, silent) {
+  const p = P(pid); if (!p || !form) return;
+  p.plano = { ...p.plano, ...readForm(form, PLAN), atualizadoEm: new Date().toISOString() };
+  await persist();
+  const el = $('#savedAt'); if (el) el.textContent = 'Salvo às ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (!silent) toast('Plano de tratamento salvo.');
+}
+actions['save-plan'] = savePlan;
+actions['add-meta'] = async ({ pid }) => {
+  const inp = $('#newMeta'); const texto = inp.value.trim(); if (!texto) { inp.focus(); return; }
+  await savePlan({ pid }, $('#planForm'), true);
+  P(pid).plano.metas.push({ id: uid(), texto, status: 'nao', criadaEm: today() });
+  await commit('Meta adicionada.');
+  $('#newMeta')?.focus();
+};
+actions['meta-status'] = async ({ pid, mid }, el) => { const m = P(pid).plano.metas.find(x => x.id === mid); m.status = el.value; m.atualizadaEm = today(); await savePlan({ pid }, $('#planForm'), true); await commit(); };
+actions['del-meta'] = async ({ pid, mid }) => { if (!confirm('Remover esta meta?')) return; await savePlan({ pid }, $('#planForm'), true); const pl = P(pid).plano; pl.metas = pl.metas.filter(x => x.id !== mid); await commit(); };
+actions['print-plan'] = ({ pid }) => {
+  const p = P(pid), pl = p.plano;
+  printDoc(`${profHeader()}<h1>Plano de tratamento</h1>${patientIdHTML(p)}
+    ${PLAN.filter(f => f.k && pl[f.k]).map(f => `<h2>${esc(f.l)}</h2><div class="pre">${esc(f.t === 'date' ? fmtD(pl[f.k]) : pl[f.k])}</div>`).join('')}
+    ${pl.metas.length ? `<h2>Metas terapêuticas</h2><table><tr><th>Meta</th><th>Situação</th></tr>${pl.metas.map(m => `<tr><td>${esc(m.texto)}</td><td>${META_STATUS[m.status]}</td></tr>`).join('')}</table>` : ''}${confidential()}`);
+};
+
+/* configurações / backup */
+const SETTINGS_FIELDS = [
+  { t: 'section', l: 'Dados profissionais (aparecem em recibos e documentos)' },
+  { k: 'nome', l: 'Nome completo' }, { k: 'crp', l: 'CRP', ph: '00/00000' },
+  { k: 'cpf', l: 'CPF / CNPJ' }, { k: 'telefone', l: 'Telefone', t: 'tel' },
+  { k: 'email', l: 'E-mail', t: 'email' }, { k: 'cidade', l: 'Cidade / UF' },
+  { k: 'endereco', l: 'Endereço do consultório', w: 'full' },
+  { t: 'section', l: 'Padrões' },
+  { k: 'valorPadrao', l: 'Valor padrão da sessão (R$)', t: 'money' }, { k: 'duracaoPadrao', l: 'Duração padrão (min)', t: 'number' },
+  { k: 'descricaoNF', l: 'Descrição padrão na nota fiscal', w: 'full' },
+  { k: 'linkNF', l: 'Link do emissor de NFS-e (prefeitura ou Emissor Nacional)', t: 'url', w: 'full' },
+];
+actions['save-settings'] = async (_d, form) => { Object.assign(db.settings, readForm(form, SETTINGS_FIELDS)); await commit('Configurações salvas.'); };
+actions['export-vault'] = async () => { download(`consultorio-backup-${today()}.json`, JSON.stringify(await sealVault(db, key, salt))); toast('Backup criptografado baixado.'); };
+actions['export-json'] = () => {
+  if (!confirm('O arquivo aberto (sem criptografia) contém dados clínicos sigilosos. Guarde-o apenas em local seguro. Continuar?')) return;
+  download(`consultorio-dados-abertos-${today()}.json`, JSON.stringify(db, null, 2));
+};
+function readFile() {
+  return new Promise(res => {
+    const inp = $('#fileIn'); inp.value = '';
+    inp.onchange = () => { const f = inp.files[0]; if (!f) return res(null); const r = new FileReader(); r.onload = () => res(r.result); r.readAsText(f); };
+    inp.click();
+  });
+}
+async function parseBackup(text) {
+  let obj; try { obj = JSON.parse(text); } catch { alert('Arquivo inválido.'); return null; }
+  if (obj.ct && obj.salt) {
+    const pw = prompt('Este backup é criptografado. Digite a senha usada quando ele foi criado:');
+    if (!pw) return null;
+    try { return (await openVault(obj, pw)).data; } catch { alert('Senha incorreta para este backup.'); return null; }
+  }
+  if (!Array.isArray(obj.patients)) { alert('Este arquivo não parece ser um backup do gerenciador.'); return null; }
+  return obj;
+}
+actions['setup-import'] = async () => {
+  const text = await readFile(); if (!text) return;
+  const data = await parseBackup(text); if (!data) return;
+  pendingImport = data;
+  $('#lockErr').textContent = '';
+  $('#setupForm p').innerHTML = `<b>Backup carregado: ${data.patients.length} paciente(s).</b> Agora crie a senha para este computador.`;
+};
+actions.import = async () => {
+  const text = await readFile(); if (!text) return;
+  const data = await parseBackup(text); if (!data) return;
+  if (!confirm(`Substituir TODOS os dados atuais (${db.patients.length} pacientes) pelo backup (${data.patients.length} pacientes)?`)) return;
+  db = migrate(data); await commit('Backup restaurado.');
+};
+actions['change-pw'] = () => openForm({ title: 'Trocar senha', fields: [
+  { k: 'atual', l: 'Senha atual', t: 'password', req: true, w: 'full' }, { k: 'nova', l: 'Nova senha (mín. 6)', t: 'password', req: true }, { k: 'conf', l: 'Repita a nova senha', t: 'password', req: true }],
+  onSave: async v => {
+    try { await openVault(JSON.parse(localStorage.getItem(STORE)), v.atual); } catch { alert('Senha atual incorreta.'); return false; }
+    if (v.nova.length < 6 || v.nova !== v.conf) { alert('A nova senha precisa ter 6+ caracteres e as duas precisam ser iguais.'); return false; }
+    salt = crypto.getRandomValues(new Uint8Array(16)); key = await deriveKey(v.nova, salt);
+    await commit('Senha alterada. Backups antigos continuam com a senha antiga.');
+  } });
+actions.wipe = async () => {
+  if (prompt('Isto apaga TODOS os dados deste navegador. Faça um backup antes!\n\nPara confirmar, digite APAGAR TUDO:') !== 'APAGAR TUDO') return;
+  localStorage.removeItem(STORE); location.hash = ''; showLock();
+};
+actions.theme = ({ v }) => { if (v) document.documentElement.dataset.theme = v; else delete document.documentElement.dataset.theme; try { localStorage.setItem('duda.theme', v); } catch {} };
+try { const th = localStorage.getItem('duda.theme'); if (th) document.documentElement.dataset.theme = th; } catch {}
+
+/* ---------- componentes de visualização ---------- */
+const badge = (txt, cls = '') => `<span class="b ${cls}">${esc(txt)}</span>`;
+const sBadge = s => badge(S_STATUS[s.status], S_BADGE[s.status]);
+function menu(items) {
+  return `<details class="menu"><summary class="btn sm">⋯</summary><div class="items">${items.filter(Boolean).map(([act, label, data = {}, cls = '']) =>
+    `<button class="${cls}" data-act="${act}" ${Object.entries(data).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ')}>${esc(label)}</button>`).join('')}</div></details>`;
+}
+function sessActs(s) {
+  const quick = s.status === 'agendado' ? `<button class="btn sm" data-act="sess-done" data-id="${s.id}" title="Marcar como realizada">✓ Realizada</button> ` : '';
+  return quick + menu([
+    s.status === 'agendado' && ['sess-miss', 'Registrar falta', { id: s.id }],
+    s.status === 'agendado' && ['sess-cancel', 'Cancelar', { id: s.id }],
+    s.status === 'agendado' && ['sess-resched', 'Reagendar', { id: s.id }],
+    (s.status === 'realizado' || s.status === 'falta') && ['new-record', 'Escrever no prontuário', { pid: s.pacienteId, sess: s.id }],
+    ['edit-session', 'Editar', { id: s.id }],
+    ['del-session', 'Excluir', { id: s.id }, 'danger'],
+  ]);
+}
+function sessDetail(s) {
+  const bits = [];
+  if (s.status === 'reagendado' && s.reagendadoPara) bits.push(`→ ${fmtD(s.reagendadoPara.data)} ${esc(s.reagendadoPara.hora || '')}`);
+  if (s.reagendadoDe) { const o = S(s.reagendadoDe); bits.push(`reagendada${o ? ' de ' + fmtD(o.data) : ''}`); }
+  if (s.motivo) bits.push(esc(s.motivo));
+  if ((s.status === 'falta' || s.status === 'cancelado')) bits.push(s.cobrar ? 'cobrada' : 'não cobrada');
+  return bits.length ? `<div class="muted">${bits.join(' · ')}</div>` : '';
+}
+function sessTable(list, { showPat = true } = {}) {
+  if (!list.length) return '<div class="empty">Nenhum atendimento.</div>';
+  return `<div class="tw"><table><thead><tr><th>Data</th>${showPat ? '<th>Paciente</th>' : ''}<th>Situação</th><th class="num">Valor</th><th></th></tr></thead><tbody>${list.map(s => {
+    const p = P(s.pacienteId);
+    return `<tr><td>${fmtDW(s.data)}<div class="muted">${esc(s.hora || '')}${s.duracao ? ` · ${esc(s.duracao)} min` : ''}${s.modalidade ? ' · ' + esc(s.modalidade) : ''}</div></td>
+      ${showPat ? `<td><a href="#/p/${p.id}/atendimentos">${esc(p.nome)}</a>${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>` : ''}
+      <td>${sBadge(s)}${sessDetail(s)}</td>
+      <td class="num">${billable(s) || s.status === 'agendado' ? money(s.valor) : `<span class="muted">—</span>`}</td>
+      <td class="acts">${sessActs(s)}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+function payTable(list, { showPat = true } = {}) {
+  if (!list.length) return '<div class="empty">Nenhum pagamento.</div>';
+  return `<div class="tw"><table><thead><tr><th>Data</th>${showPat ? '<th>Paciente</th>' : ''}<th>Forma</th><th>Referente a</th><th class="num">Valor</th><th>NF</th><th></th></tr></thead><tbody>${list.map(x => {
+    const p = P(x.pacienteId), inv = invoiceOf(x.id);
+    return `<tr><td>${fmtD(x.data)}</td>${showPat ? `<td><a href="#/p/${p.id}/financeiro">${esc(p.nome)}</a></td>` : ''}
+      <td>${esc(x.forma || '')}${x.parcelas > 1 ? ` (${esc(x.parcelas)}x)` : ''}</td><td>${esc(x.referencia || '')}${x.pagador && x.pagador !== p.nome ? `<div class="muted">pago por ${esc(x.pagador)}</div>` : ''}</td>
+      <td class="num">${money(x.valor)}</td>
+      <td>${inv ? badge(inv.status === 'emitida' ? `NF ${inv.numero || ''}` : 'NF a emitir', NF_BADGE[inv.status]) : badge('sem NF', 'bad')}</td>
+      <td class="acts">${menu([['receipt', 'Imprimir recibo', { id: x.id }], !inv && ['new-invoice', 'Gerar nota fiscal', { pid: p.id, pay: x.id }], ['edit-payment', 'Editar', { id: x.id }], ['del-payment', 'Excluir', { id: x.id }, 'danger']])}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+function invTable(list, { showPat = true } = {}) {
+  if (!list.length) return '<div class="empty">Nenhuma nota fiscal.</div>';
+  return `<div class="tw"><table><thead><tr><th>Nº</th><th>Emissão</th>${showPat ? '<th>Paciente</th>' : ''}<th>Tomador</th><th class="num">Valor</th><th>Situação</th><th></th></tr></thead><tbody>${list.map(i => {
+    const p = P(i.pacienteId);
+    return `<tr><td>${esc(i.numero || '—')}</td><td>${fmtD(i.dataEmissao)}<div class="muted">${i.competencia ? 'comp. ' + fmtMonth(i.competencia) : ''}</div></td>
+      ${showPat ? `<td><a href="#/p/${p.id}/financeiro">${esc(p.nome)}</a></td>` : ''}
+      <td>${esc(i.tomadorNome || '')}<div class="muted">${esc(i.tomadorCpf || '')}</div></td><td class="num">${money(i.valor)}</td>
+      <td>${badge(NF_STATUS[i.status], NF_BADGE[i.status])}${i.link ? `<div><a href="${esc(/^https?:/.test(i.link) ? i.link : '#')}" target="_blank" rel="noopener" class="muted">abrir</a></div>` : ''}</td>
+      <td class="acts">${i.status === 'pendente' ? `<button class="btn sm" data-act="mark-issued" data-id="${i.id}">Marcar emitida</button> ` : ''}${menu([
+        ['copy-invoice', 'Copiar dados p/ emissor', { id: i.id }], ['edit-invoice', 'Editar', { id: i.id }], ['del-invoice', 'Excluir', { id: i.id }, 'danger']])}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+const nfLink = () => `<a class="btn" href="${esc(db.settings.linkNF || NFSE_NACIONAL)}" target="_blank" rel="noopener">Abrir emissor de NFS-e ↗</a>`;
+function contactBadge(dias) {
+  if (dias < 0) return badge(`atrasado ${-dias} dia${dias === -1 ? '' : 's'}`, 'bad');
+  if (dias === 0) return badge('hoje', 'warn');
+  if (dias <= 7) return badge(`em ${dias} dia${dias === 1 ? '' : 's'}`, 'warn');
+  return badge(`em ${dias} dias`, 'ok');
+}
+function guardiansInline(p) {
+  return p.responsaveis.map(r => { const w = waLink(r.telefone); return `<div>${esc(r.nome)} <span class="muted">(${esc(r.parentesco || '')})</span>${r.telefone ? ` · ${w ? `<a href="${w}" target="_blank" rel="noopener">${esc(r.telefone)}</a>` : esc(r.telefone)}` : ''}</div>`; }).join('') || '<span class="muted">Nenhum responsável cadastrado</span>';
+}
+
+/* ---------- telas ---------- */
+function vDashboard() {
+  const t = today(), wk = addDays(t, 7), month = t.slice(0, 7);
+  const active = db.patients.filter(p => p.status === 'ativo');
+  const upcoming = db.sessions.filter(s => s.status === 'agendado' && s.data >= t && s.data <= wk).sort(bySess);
+  const stale = db.sessions.filter(s => s.status === 'agendado' && s.data < t).sort(bySess);
+  const contacts = active.filter(isMinor).map(p => ({ p, ...contactInfo(p) })).filter(c => c.dias <= 7).sort((a, b) => a.next.localeCompare(b.next));
+  const owing = db.patients.map(p => ({ p, ...balance(p.id) })).filter(x => x.bal > 0.005).sort((a, b) => b.bal - a.bal);
+  const semNF = db.payments.filter(x => !invoiceOf(x.id));
+  const nfPend = db.invoices.filter(i => i.status === 'pendente');
+  const recMes = sum(db.payments.filter(x => x.data.startsWith(month)), x => x.valor);
+  const planRev = active.filter(p => p.plano.revisao && p.plano.revisao <= addDays(t, 7));
+  const noGuard = active.filter(p => isMinor(p) && !p.responsaveis.length);
+  const pend = [
+    ...noGuard.map(p => `<li><a href="#/p/${p.id}/dados">${esc(p.nome)}</a> é menor de idade e não tem responsável cadastrado.</li>`),
+    ...planRev.map(p => `<li>Revisar o <a href="#/p/${p.id}/plano">plano de tratamento de ${esc(p.nome)}</a> (${fmtD(p.plano.revisao)}).</li>`),
+    nfPend.length && `<li><a href="#/financeiro">${nfPend.length} nota(s) fiscal(is) a emitir</a>.</li>`,
+    semNF.length && `<li><a href="#/financeiro">${semNF.length} pagamento(s) ainda sem nota fiscal</a>.</li>`,
+  ].filter(Boolean);
+  return `<div class="head"><div><h1>Olá${db.settings.nome ? ', ' + esc(db.settings.nome.split(' ')[0]) : ''}!</h1><div class="muted">${fmtDW(t)}</div></div>
+    <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button><button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
+    <div class="stats">
+      <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
+      <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
+      <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span></div>
+      <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
+      <div class="stat ${contacts.some(c => c.dias < 0) ? 'bad' : contacts.length ? 'warn' : ''}"><b>${contacts.length}</b><span>contatos c/ responsáveis</span></div>
+    </div>
+    ${stale.length ? `<div class="card"><h2>Atualize a situação destas sessões passadas</h2><p class="muted">Ainda estão como “agendado”. Marque se foram realizadas, faltas, cancelamentos ou reagendamentos.</p>${sessTable(stale)}</div>` : ''}
+    <div class="cols">
+      <div class="card"><h2>Próximos 7 dias</h2>${sessTable(upcoming)}</div>
+      <div>
+        <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
+        <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<div class="empty">Tudo em dia. 🌿</div>'}</div>
+        ${owing.length ? `<div class="card"><h2>Saldos em aberto</h2><div class="tw"><table><tbody>${owing.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.bal)}</td><td class="acts"><button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+      </div>
+    </div>`;
+}
+
+function vPatients() {
+  listRenderer = () => {
+    const q = ui.pq.trim().toLowerCase();
+    const list = db.patients.filter(p => (!ui.pstatus || p.status === ui.pstatus || (ui.pstatus === 'menores' && isMinor(p) && p.status === 'ativo'))
+      && (!q || [p.nome, p.nomeSocial, p.cpf, p.telefone, ...p.responsaveis.map(r => r.nome)].some(v => String(v || '').toLowerCase().includes(q))))
+      .sort((a, b) => a.nome.localeCompare(b.nome));
+    if (!list.length) return `<div class="empty">${db.patients.length ? 'Nenhum paciente encontrado.' : 'Nenhum paciente cadastrado ainda. Clique em “+ Novo paciente”.'}</div>`;
+    return `<div class="tw"><table><thead><tr><th>Nome</th><th>Idade</th><th>Contato</th><th>Próxima sessão</th><th class="num">Saldo</th><th>Situação</th></tr></thead><tbody>${list.map(p => {
+      const a = age(p.nasc), ns = nextSession(p.id), b = balance(p.id);
+      return `<tr><td><a href="#/p/${p.id}/dados"><b>${esc(p.nome)}</b></a>${p.nomeSocial ? `<div class="muted">${esc(p.nomeSocial)}</div>` : ''}</td>
+        <td>${a ?? '—'}${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>
+        <td>${isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${esc(p.responsaveis[0].telefone || '')}</div>` : esc(p.telefone || '')}</td>
+        <td>${ns ? `${fmtDW(ns.data)} <span class="muted">${esc(ns.hora || '')}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="num">${b.bal > 0.005 ? `<span style="color:var(--warn)">${money(b.bal)}</span>` : b.bal < -0.005 ? `<span class="muted">crédito ${money(-b.bal)}</span>` : '<span class="muted">em dia</span>'}</td>
+        <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  };
+  return `<div class="head"><h1>Pacientes</h1><div class="actions"><button class="btn primary" data-act="new-patient">+ Novo paciente</button></div></div>
+    <div class="card"><div class="toolbar">
+      <label class="fld"><span>Buscar</span><input data-ui="pq" data-soft="1" value="${esc(ui.pq)}" placeholder="Nome, CPF, telefone ou responsável"></label>
+      <label class="fld" style="flex:0 1 200px"><span>Situação</span><select data-ui="pstatus">${optsHTML([['', 'Todos'], ...Object.entries(P_STATUS), ['menores', 'Menores de idade (ativos)']], ui.pstatus)}</select></label>
+    </div><div id="list">${listRenderer()}</div></div>`;
+}
+
+function vPatient({ id, tab = 'dados' }) {
+  const p = P(id);
+  if (!p) return `<div class="card">Paciente não encontrado. <a href="#/pacientes">Voltar</a></div>`;
+  const minor = isMinor(p), a = age(p.nasc);
+  const tabs = [['dados', 'Dados'], ['atendimentos', 'Atendimentos'], ['financeiro', 'Pagamentos e NF'], (minor || p.responsaveis.length) && ['contatos', 'Contatos c/ responsáveis'], ['prontuario', 'Prontuário'], ['estudo', 'Estudo de caso'], ['plano', 'Plano de tratamento']].filter(Boolean);
+  const body = { dados: tDados, atendimentos: tAtend, financeiro: tFin, contatos: tContatos, prontuario: tPront, estudo: tEstudo, plano: tPlano }[tab] || tDados;
+  return `<div class="head"><div><div class="muted"><a href="#/pacientes">← Pacientes</a></div><h1>${esc(p.nome)}</h1>
+      <div class="row">${a !== null ? `<span class="muted">${a} anos</span>` : ''}${minor ? badge('menor de idade', 'acc') : ''}${badge(P_STATUS[p.status], p.status === 'ativo' ? 'ok' : 'warn')}${p.modalidade ? badge(p.modalidade) : ''}</div></div>
+    <div class="actions"><button class="btn" data-act="new-session" data-pid="${p.id}">+ Agendar</button><button class="btn" data-act="new-record" data-pid="${p.id}">+ Prontuário</button>${menu([['edit-patient', 'Editar dados', { id: p.id }], ['new-payment', 'Registrar pagamento', { pid: p.id }], ['del-patient', 'Excluir paciente', { id: p.id }, 'danger']])}</div></div>
+    <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/p/${p.id}/${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>
+    ${body(p)}`;
+}
+function tDados(p) {
+  const kv = (l, v) => v ? `<dt>${l}</dt><dd>${v}</dd>` : '';
+  const minor = isMinor(p);
+  return `<div class="cols">
+    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
+      <dl class="kv">${kv('Nome', esc(p.nome))}${kv('Nome social', esc(p.nomeSocial))}${kv('Nascimento', p.nasc ? `${fmtD(p.nasc)} (${age(p.nasc)} anos)` : '')}${kv('CPF', esc(p.cpf))}${kv('RG', esc(p.rg))}${kv('Gênero', esc(p.genero))}
+      ${kv('Telefone', p.telefone ? (waLink(p.telefone) ? `<a href="${waLink(p.telefone)}" target="_blank" rel="noopener">${esc(p.telefone)}</a>` : esc(p.telefone)) : '')}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
+    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
+      ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
+  </div>
+  <div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Responsáveis ${minor ? '' : '<span class="muted">(opcional para maiores de idade)</span>'}</h2><button class="btn sm primary" data-act="new-guardian" data-pid="${p.id}">+ Responsável</button></div>
+    ${minor && !p.responsaveis.length ? '<div class="alert">Paciente menor de idade: cadastre pelo menos um responsável legal.</div>' : ''}
+    <div class="cols">${p.responsaveis.map(r => `<div class="gcard"><div class="row" style="justify-content:space-between"><b>${esc(r.nome)}</b>${menu([['edit-guardian', 'Editar', { pid: p.id, id: r.id }], ['del-guardian', 'Remover', { pid: p.id, id: r.id }, 'danger']])}</div>
+      <div class="row" style="margin:4px 0">${badge(r.parentesco || 'responsável')}${r.financeiro ? badge('financeiro', 'ok') : ''}${r.guarda ? badge('guarda / autoriza', 'info') : ''}</div>
+      <dl class="kv">${kv('CPF', esc(r.cpf))}${kv('RG', esc(r.rg))}${kv('Telefone', r.telefone ? (waLink(r.telefone) ? `<a href="${waLink(r.telefone)}" target="_blank" rel="noopener">${esc(r.telefone)}</a>` : esc(r.telefone)) : '')}${kv('E-mail', esc(r.email))}${kv('Profissão', esc(r.profissao))}${kv('Endereço', esc(r.endereco))}</dl>
+      ${r.obs ? `<div class="muted pre">${esc(r.obs)}</div>` : ''}</div>`).join('') || (minor ? '' : '<div class="empty">Nenhum responsável cadastrado.</div>')}</div></div>`;
+}
+function tAtend(p) {
+  const all = sessOf(p.id).sort(bySess), t = today();
+  const fut = all.filter(s => s.status === 'agendado' && s.data >= t), past = all.filter(s => !(s.status === 'agendado' && s.data >= t)).reverse();
+  const c = st => all.filter(s => s.status === st).length;
+  return `<div class="stats">
+    <div class="stat"><b>${c('realizado')}</b><span>realizadas</span></div><div class="stat ${c('falta') ? 'bad' : ''}"><b>${c('falta')}</b><span>faltas</span></div>
+    <div class="stat"><b>${c('cancelado')}</b><span>cancelamentos</span></div><div class="stat"><b>${c('reagendado')}</b><span>reagendamentos</span></div>
+    <div class="stat"><b>${fut.length}</b><span>agendadas</span></div></div>
+    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Próximas sessões</h2><button class="btn sm primary" data-act="new-session" data-pid="${p.id}">+ Agendar</button></div>${sessTable(fut, { showPat: false })}</div>
+    <div class="card"><h2>Histórico</h2>${sessTable(past, { showPat: false })}</div>`;
+}
+function tFin(p) {
+  const b = balance(p.id), pays = paysOf(p.id).sort((a, b) => b.data.localeCompare(a.data)), invs = invsOf(p.id).sort((a, b) => (b.dataEmissao || b.competencia || '').localeCompare(a.dataEmissao || a.competencia || ''));
+  return `<div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável (sessões)</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
+    <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
+    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div>${payTable(pays, { showPat: false })}</div>
+    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
+      ${isMinor(p) ? `<p class="muted">Paciente menor: a nota sai em nome do responsável financeiro (${esc(payer(p).nome || 'não definido')}).</p>` : ''}${invTable(invs, { showPat: false })}</div>`;
+}
+function tContatos(p) {
+  const ci = contactInfo(p);
+  return `<div class="card"><div class="head" style="margin-bottom:8px"><div><h2 style="margin:0">Próximo contato: ${fmtDW(ci.next)}</h2><div class="row" style="margin-top:4px">${contactBadge(ci.dias)}<span class="muted">${ci.last ? `Último: ${fmtD(ci.last.data)} (${esc(ci.last.meio)})` : 'Nenhum contato registrado ainda'}</span></div></div>
+      <button class="btn primary" data-act="new-contact" data-pid="${p.id}">Registrar contato</button></div>
+    <div class="muted">Lembrete mensal para menores de idade. Responsáveis:</div>${guardiansInline(p)}</div>
+    <div class="card"><h2>Histórico de contatos</h2>${ci.list.length ? `<div class="tw"><table><thead><tr><th>Data</th><th>Meio</th><th>Com</th><th>Resumo</th><th>Próximo</th><th></th></tr></thead><tbody>${ci.list.map(c => `<tr><td>${fmtD(c.data)}</td><td>${esc(c.meio)}</td><td>${esc(c.responsavel)}</td><td class="pre">${esc(c.resumo)}</td><td>${fmtD(c.proximo || addMonths(c.data, 1))}</td><td class="acts">${menu([['edit-contact', 'Editar', { id: c.id }], ['del-contact', 'Excluir', { id: c.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato registrado.</div>'}</div>`;
+}
+function tPront(p) {
+  const rs = db.records.filter(r => r.pacienteId === p.id).sort((a, b) => b.data.localeCompare(a.data) || (b.criadoEm || '').localeCompare(a.criadoEm || ''));
+  const pendentes = sessOf(p.id).filter(s => s.status === 'realizado' && !db.records.some(r => r.sessaoId === s.id)).sort(bySess).reverse();
+  return `${pendentes.length ? `<div class="alert info">${pendentes.length} sessão(ões) realizada(s) sem evolução no prontuário: ${pendentes.slice(0, 6).map(s => `<a href="#" data-act="new-record" data-pid="${p.id}" data-sess="${s.id}">${fmtD(s.data)}</a>`).join(', ')}${pendentes.length > 6 ? '…' : ''}</div>` : ''}
+    <div class="card"><div class="head" style="margin-bottom:12px"><h2 style="margin:0">Prontuário (${rs.length} registro${rs.length === 1 ? '' : 's'})</h2><div class="actions"><button class="btn sm" data-act="print-records" data-pid="${p.id}">Imprimir / PDF</button><button class="btn sm primary" data-act="new-record" data-pid="${p.id}">+ Registro</button></div></div>
+    ${rs.map(r => { const s = r.sessaoId ? S(r.sessaoId) : null; return `<div class="entry"><div class="meta"><div><b>${fmtD(r.data)}</b> · ${esc(r.tipo)}${s ? ` <span class="muted">(sessão ${esc(s.hora || '')})</span>` : ''}${r.editadoEm ? ` <span class="muted">· editado em ${fmtD(r.editadoEm.slice(0, 10))}</span>` : ''}</div>${menu([['edit-record', 'Editar', { id: r.id }], ['del-record', 'Excluir', { id: r.id }, 'danger']])}</div><div class="pre">${esc(r.texto)}</div></div>`; }).join('') || '<div class="empty">Nenhum registro ainda.</div>'}
+    <p class="muted" style="margin-bottom:0">Lembrete: a Resolução CFP nº 01/2009 pede a guarda do registro documental por no mínimo 5 anos.</p></div>`;
+}
+function tEstudo(p) {
+  const e = p.estudo;
+  return `<form class="card" data-submit="save-study" data-autosave="save-study" data-pid="${p.id}">
+    <div class="head"><div><h2 style="margin:0">Estudo de caso</h2><div class="muted" id="savedAt">${e.atualizadoEm ? 'Última atualização: ' + fmtD(e.atualizadoEm.slice(0, 10)) : 'Salva automaticamente ao sair de cada campo.'}</div></div>
+    <div class="actions"><button type="button" class="btn sm" data-act="print-study" data-pid="${p.id}">Imprimir / PDF</button><button class="btn sm primary">Salvar</button></div></div>
+    <div class="grid">${STUDY.map(([k, l]) => fieldHTML({ k, l, t: 'textarea', rows: 4 }, e[k])).join('')}</div></form>`;
+}
+function tPlano(p) {
+  const pl = p.plano;
+  return `<form class="card" id="planForm" data-submit="save-plan" data-autosave="save-plan" data-pid="${p.id}">
+    <div class="head"><div><h2 style="margin:0">Plano de tratamento</h2><div class="muted" id="savedAt">${pl.atualizadoEm ? 'Última atualização: ' + fmtD(pl.atualizadoEm.slice(0, 10)) : 'Salvo automaticamente ao sair de cada campo.'}</div></div>
+    <div class="actions"><button type="button" class="btn sm" data-act="print-plan" data-pid="${p.id}">Imprimir / PDF</button><button class="btn sm primary">Salvar</button></div></div>
+    ${pl.revisao && pl.revisao <= today() ? `<div class="alert">A data de revisão do plano (${fmtD(pl.revisao)}) chegou.</div>` : ''}
+    <div class="grid">${PLAN.map(f => fieldHTML(f, pl[f.k])).join('')}</div></form>
+  <div class="card"><h2>Metas terapêuticas</h2>
+    ${pl.metas.length ? `<div class="tw"><table><tbody>${pl.metas.map(m => `<tr><td>${esc(m.texto)}<div class="muted">criada em ${fmtD(m.criadaEm)}${m.atualizadaEm ? ' · atualizada em ' + fmtD(m.atualizadaEm) : ''}</div></td>
+      <td style="width:190px"><select data-change="meta-status" data-pid="${p.id}" data-mid="${m.id}">${optsHTML(Object.entries(META_STATUS), m.status)}</select></td>
+      <td class="acts"><button class="btn sm danger" data-act="del-meta" data-pid="${p.id}" data-mid="${m.id}">Remover</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhuma meta ainda.</div>'}
+    <div class="row" style="margin-top:10px"><input id="newMeta" placeholder="Nova meta (ex.: reduzir crises de ansiedade antes das provas)" style="flex:1 1 260px" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('addMetaBtn').click()}"><button class="btn primary" id="addMetaBtn" data-act="add-meta" data-pid="${p.id}">Adicionar</button></div></div>`;
+}
+
+function vAgenda() {
+  const t = today();
+  if (!ui.agFrom) ui.agFrom = t;
+  if (!ui.agTo) ui.agTo = addDays(t, 30);
+  const inRange = db.sessions.filter(s => s.data >= ui.agFrom && s.data <= ui.agTo);
+  const list = inRange.filter(s => !ui.agStatus || s.status === ui.agStatus).sort(bySess);
+  const days = [...new Set(list.map(s => s.data))];
+  const c = st => inRange.filter(s => s.status === st).length;
+  const preset = (l, a, b) => `<button class="btn sm" data-act="ag-range" data-a="${a}" data-b="${b}">${l}</button>`;
+  const m0 = t.slice(0, 8) + '01', mPrev = addMonths(m0, -1);
+  return `<div class="head"><h1>Agenda</h1><div class="actions"><button class="btn primary" data-act="new-session">+ Agendar sessão</button></div></div>
+    <div class="card"><div class="toolbar">
+      <label class="fld"><span>De</span><input type="date" data-ui="agFrom" value="${ui.agFrom}"></label>
+      <label class="fld"><span>Até</span><input type="date" data-ui="agTo" value="${ui.agTo}"></label>
+      <label class="fld"><span>Situação</span><select data-ui="agStatus">${optsHTML([['', 'Todas'], ...Object.entries(S_STATUS)], ui.agStatus)}</select></label>
+    </div><div class="row">${preset('Hoje', t, t)}${preset('Próximos 7 dias', t, addDays(t, 7))}${preset('Próximos 30 dias', t, addDays(t, 30))}${preset('Este mês', m0, addDays(addMonths(m0, 1), -1))}${preset('Mês passado', mPrev, addDays(m0, -1))}</div></div>
+    <div class="stats"><div class="stat"><b>${c('agendado')}</b><span>agendadas</span></div><div class="stat"><b>${c('realizado')}</b><span>realizadas</span></div><div class="stat"><b>${c('falta')}</b><span>faltas</span></div><div class="stat"><b>${c('cancelado')}</b><span>cancelamentos</span></div><div class="stat"><b>${c('reagendado')}</b><span>reagendamentos</span></div></div>
+    <div class="card">${days.length ? days.map(d => `<div class="day">${fmtDW(d)}${d === t ? ' ' + badge('hoje', 'acc') : ''}</div>${sessTable(list.filter(s => s.data === d))}`).join('') : '<div class="empty">Nenhuma sessão neste período.</div>'}</div>`;
+}
+actions['ag-range'] = ({ a, b }) => { ui.agFrom = a; ui.agTo = b; render(); };
+
+function vFinance() {
+  const month = ui.finMonth || today().slice(0, 7);
+  const pays = db.payments.filter(x => x.data.startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
+  const byForm = {}; pays.forEach(x => { byForm[x.forma || 'Outro'] = (byForm[x.forma || 'Outro'] || 0) + num(x.valor); });
+  const invs = db.invoices.filter(i => (i.dataEmissao || '').startsWith(month) || (!i.dataEmissao && i.competencia === month) || i.status === 'pendente').sort((a, b) => (b.dataEmissao || '').localeCompare(a.dataEmissao || ''));
+  const billed = sum(db.sessions.filter(s => s.data.startsWith(month) && billable(s)), s => s.valor);
+  const nfTotal = sum(db.invoices.filter(i => i.status === 'emitida' && (i.dataEmissao || '').startsWith(month)), i => i.valor);
+  const semNF = db.payments.filter(x => !invoiceOf(x.id)).sort((a, b) => b.data.localeCompare(a.data));
+  const bals = db.patients.map(p => ({ p, ...balance(p.id) })).filter(x => Math.abs(x.bal) > 0.005).sort((a, b) => b.bal - a.bal);
+  return `<div class="head"><h1>Financeiro</h1><div class="actions">${nfLink()}<button class="btn" data-act="new-invoice">+ Nota fiscal</button><button class="btn primary" data-act="new-payment">+ Pagamento</button></div></div>
+    <div class="card"><div class="toolbar"><label class="fld" style="flex:0 1 220px"><span>Mês</span><input type="month" data-ui="finMonth" value="${month}"></label></div>
+      <div class="stats" style="margin:0"><div class="stat"><b>${money(sum(pays, x => x.valor))}</b><span>recebido em ${fmtMonth(month)}</span></div>
+      <div class="stat"><b>${money(billed)}</b><span>sessões cobráveis no mês</span></div><div class="stat"><b>${money(nfTotal)}</b><span>em notas emitidas no mês</span></div>
+      <div class="stat ${semNF.length ? 'warn' : ''}"><b>${semNF.length}</b><span>pagamentos sem NF (total)</span></div></div>
+      ${Object.keys(byForm).length ? `<div class="row" style="margin-top:12px">${Object.entries(byForm).map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''}</div>
+    <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
+    <div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>
+    ${semNF.length ? `<div class="card"><h2>Pagamentos sem nota fiscal</h2>${payTable(semNF)}</div>` : ''}
+    <div class="card"><h2>Saldos por paciente</h2>${bals.length ? `<div class="tw"><table><thead><tr><th>Paciente</th><th class="num">Cobrável</th><th class="num">Pago</th><th class="num">Saldo</th><th></th></tr></thead><tbody>${bals.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.due)}</td><td class="num">${money(x.paid)}</td><td class="num">${x.bal > 0 ? `<b style="color:var(--warn)">${money(x.bal)}</b>` : `<span class="muted">crédito ${money(-x.bal)}</span>`}</td><td class="acts">${x.bal > 0 ? `<button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Todos os pacientes estão em dia.</div>'}</div>`;
+}
+
+function vContacts() {
+  const list = db.patients.filter(needsContact).map(p => ({ p, ...contactInfo(p) })).sort((a, b) => a.next.localeCompare(b.next));
+  return `<div class="head"><div><h1>Contatos com responsáveis</h1><div class="muted">Pacientes menores de idade ativos — um contato a cada mês.</div></div></div>
+    <div class="card">${list.length ? `<div class="tw"><table><thead><tr><th>Paciente</th><th>Responsáveis</th><th>Último contato</th><th>Próximo</th><th></th></tr></thead><tbody>${list.map(c => `<tr>
+      <td><a href="#/p/${c.p.id}/contatos"><b>${esc(c.p.nome)}</b></a><div class="muted">${age(c.p.nasc)} anos</div></td><td>${guardiansInline(c.p)}</td>
+      <td>${c.last ? `${fmtD(c.last.data)}<div class="muted">${esc(c.last.meio)}</div>` : '<span class="muted">nunca</span>'}</td>
+      <td>${fmtD(c.next)}<div>${contactBadge(c.dias)}</div></td>
+      <td class="acts"><button class="btn sm primary" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum paciente menor de idade ativo.</div>'}</div>`;
+}
+
+function vConfig() {
+  let size = 0; try { size = (localStorage.getItem(STORE) || '').length * 2; } catch {}
+  const theme = document.documentElement.dataset.theme || '';
+  return `<div class="head"><h1>Configurações</h1></div>
+    <form class="card" data-submit="save-settings"><div class="grid">${SETTINGS_FIELDS.map(f => fieldHTML(f, db.settings[f.k])).join('')}</div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn primary">Salvar configurações</button></div></form>
+    <div class="cols">
+      <div class="card"><h2>Backup</h2>
+        <p class="muted">Os dados ficam apenas neste navegador, neste computador. Faça backups com frequência (ex.: toda semana) e guarde em um pendrive ou nuvem.</p>
+        <div class="row"><button class="btn primary" data-act="export-vault">Baixar backup criptografado</button><button class="btn" data-act="import">Restaurar backup</button></div>
+        <p class="muted">O backup criptografado só abre com a senha atual. Para levar a outro computador, abra este arquivo lá e escolha “Restaurar backup”.</p>
+        <button class="btn sm" data-act="export-json">Exportar dados abertos (sem criptografia)</button>
+        <p class="muted" style="margin-bottom:0">Espaço usado: ${(size / 1024).toFixed(0)} KB de ~5.000 KB disponíveis no navegador.</p></div>
+      <div class="card"><h2>Segurança e aparência</h2>
+        <p class="muted">Bloqueio automático após ${AUTOLOCK_MIN} minutos sem uso.</p>
+        <div class="row"><button class="btn" data-act="change-pw">Trocar senha</button><button class="btn" data-act="lock">Bloquear agora</button></div>
+        <h3 style="margin-top:16px">Tema</h3><div class="row">${[['', 'Automático'], ['light', 'Claro'], ['dark', 'Escuro']].map(([v, l]) => `<button class="btn sm ${theme === v ? 'primary' : ''}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
+        <h3 style="margin-top:16px">Zona de perigo</h3><button class="btn danger" data-act="wipe">Apagar todos os dados deste navegador</button></div>
+    </div>`;
+}
+const _theme = actions.theme; actions.theme = d => { _theme(d); render(); };
+
+/* ---------- roteador ---------- */
+function route() { const [page, id, tab] = (location.hash.slice(2) || 'inicio').split('/'); return { page, id, tab }; }
+function render() {
+  if (!db) return;
+  const r = route();
+  listRenderer = null;
+  const views = { inicio: vDashboard, pacientes: vPatients, p: vPatient, agenda: vAgenda, financeiro: vFinance, contatos: vContacts, config: vConfig };
+  const active = document.activeElement, focusKey = active?.dataset?.ui, selStart = active?.selectionStart;
+  $('#main').innerHTML = (views[r.page] || vDashboard)(r);
+  $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (r.page === 'p' ? 'pacientes' : r.page)));
+  if (focusKey) { const el = $(`[data-ui="${focusKey}"]`); if (el) { el.focus(); try { el.setSelectionRange(selStart, selStart); } catch {} } }
+}
+let lastPage = '';
+window.addEventListener('hashchange', () => { const k = location.hash.split('/').slice(0, 3).join('/'); if (k !== lastPage) window.scrollTo(0, 0); lastPage = k; render(); });
+
+showLock();
+</script>
+</body>
+</html>
