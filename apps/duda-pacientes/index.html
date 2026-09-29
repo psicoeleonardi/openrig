@@ -1983,7 +1983,11 @@ function vDashboard() {
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
       <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span></div>
       <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
-      ${reps.length ? `<div class="stat ${repPagar > 0.005 ? 'warn' : ''}"><b>${money(repPagar)}</b><span>repasses a pagar</span></div>` : ''}
+      ${(() => {  // um quadro por plataforma com valor em aberto
+        const dev = reps.filter(r => r.saldo > 0.005);
+        if (dev.length) return dev.map(r => `<div class="stat warn"><b>${money(r.saldo)}</b><span>a pagar a ${esc(r.pl.nome)}</span></div>`).join('');
+        return reps.some(r => r.pacientes || r.n) ? '<div class="stat"><b>R$ 0,00</b><span>repasses a pagar</span></div>' : '';
+      })()}
       <div class="stat ${contacts.some(c => c.dias < 0) ? 'bad' : contacts.length ? 'warn' : ''}"><b>${contacts.length}</b><span>contatos c/ responsáveis</span></div>
     </div>
     ${stale.length ? `<div class="card"><h2>Atualize a situação destas sessões passadas</h2><p class="muted">Ainda estão como “agendado”. Marque se foram realizadas, faltas, cancelamentos ou reagendamentos.</p>${sessTable(stale)}</div>` : ''}
@@ -2187,7 +2191,13 @@ function vFinance() {
       <div class="stats" style="margin:0"><div class="stat"><b>${money(sum(pays, x => x.valor))}</b><span>recebido em ${fmtMonth(month)}</span></div>
       <div class="stat"><b>${money(billed)}</b><span>sessões cobráveis no mês</span></div><div class="stat"><b>${money(nfTotal)}</b><span>em notas emitidas no mês</span></div>
       <div class="stat ${semNF.length ? 'warn' : ''}"><b>${semNF.length}</b><span>pagamentos sem NF (total)</span></div>
-      ${reps.length ? `<div class="stat"><b>${money(repMes)}</b><span>repasses das sessões do mês</span></div><div class="stat"><b>${money(billed - repMes)}</b><span>líquido das sessões do mês (após repasses)</span></div>` : ''}</div>
+      ${(() => {  // repasse do mês separado por plataforma
+        const ativas = reps.filter(r => r.mes > 0.005 || r.pacientes || r.saldo > 0.005);
+        if (!ativas.length) return '';
+        const mesNome = MONTHS[Number(month.slice(5)) - 1];
+        return ativas.map(r => `<div class="stat"><b>${money(r.mes)}</b><span>repasse ${esc(r.pl.nome)} em ${mesNome}</span></div>`).join('')
+          + `<div class="stat"><b>${money(billed - repMes)}</b><span>líquido das sessões do mês (após ${ativas.length > 1 ? `${money(repMes)} de repasses` : 'repasses'})</span></div>`;
+      })()}</div>
       ${Object.keys(byForm).length ? `<div class="row" style="margin-top:12px">${Object.entries(byForm).map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''}</div>
     ${platCard(reps, repPagosMes, month)}
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
