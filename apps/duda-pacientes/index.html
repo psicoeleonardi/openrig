@@ -190,6 +190,8 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 .bgs { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; margin: 8px 0; }
 .sw { height: 66px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; display: flex; align-items: flex-end; padding: 0; overflow: hidden; font: inherit; }
 .sw span { background: var(--surface); color: var(--text); font-size: .74rem; padding: 2px 7px; border-radius: 0 7px 0 0; }
+.faixas input, .faixas select { min-width: 90px; }
+.faixas td { padding: 4px; border: 0; }
 .sw.on { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #print { display: none; }
@@ -431,6 +433,11 @@ const hasVal = v => v !== '' && v != null;
 function repasseRate(p, valor) {
   const pl = PLAT(p?.plataformaId); if (!pl) return 0;
   if (hasVal(p.repasse)) return num(p.repasse);
+  if (pl.tipo === 'faixas') {  // a última faixa cujo "a partir de" o valor da sessão alcança
+    const f = (pl.faixas || []).filter(x => num(valor) >= num(x.de) - 1e-9).sort((a, b) => num(a.de) - num(b.de)).pop();
+    if (!f) return 0;
+    return f.tipo === 'percentual' ? Math.round(num(valor) * num(f.valor)) / 100 : num(f.valor);
+  }
   return pl.tipo === 'percentual' ? Math.round(num(valor) * num(pl.valor)) / 100 : num(pl.valor);
 }
 const platOf = s => s.plataformaId !== undefined ? s.plataformaId : P(s.pacienteId)?.plataformaId;
@@ -438,7 +445,18 @@ const repasseOf = s => !billable(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : r
 function stampRepasse(s, p) { if (p?.plataformaId) { s.plataformaId = p.plataformaId; s.repasse = repasseRate(p, s.valor); } else { s.plataformaId = ''; delete s.repasse; } return s; }
 function freezePastRepasse(p) { sessOf(p.id).filter(s => s.plataformaId === undefined && s.status !== 'agendado').forEach(s => stampRepasse(s, p)); }  // antes de mudar a regra, fixa a dos atendimentos já feitos
 function refreshFutureRepasse(p) { sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today()).forEach(s => stampRepasse(s, p)); }
-const platRegra = pl => pl.tipo === 'percentual' ? `${String(num(pl.valor)).replace('.', ',')}% do valor da sessão` : `${money(pl.valor)} por atendimento`;
+const pct = v => `${String(num(v)).replace('.', ',')}%`;
+function faixaTxt(f) { return num(f.valor) === 0 ? 'não cobra' : f.tipo === 'percentual' ? pct(f.valor) : money(f.valor); }
+function platRegra(pl) {
+  if (pl.tipo === 'faixas') {
+    const fs = (pl.faixas || []).slice().sort((a, b) => num(a.de) - num(b.de));
+    if (!fs.length) return 'faixas não definidas';
+    return fs.map((f, i) => { const nx = fs[i + 1];
+      const rng = nx ? (num(f.de) === 0 ? `até ${money(num(nx.de) - 0.01)}` : `${money(f.de)} a ${money(num(nx.de) - 0.01)}`) : `a partir de ${money(f.de)}`;
+      return `${rng}: ${faixaTxt(f)}`; }).join(' · ');
+  }
+  return pl.tipo === 'percentual' ? `${pct(pl.valor)} do valor da sessão` : `${money(pl.valor)} por atendimento`;
+}
 function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mês
   return (db.settings.plataformas || []).map(pl => {
     const ss = db.sessions.filter(s => platOf(s) === pl.id && billable(s));
@@ -950,6 +968,13 @@ function fieldHTML(f, v) {
     case 'select': return `<label class="fld${full}">${lab}<select name="${f.k}"${req}>${f.empty ? '<option value="">—</option>' : ''}${optsHTML(f.opts, v)}</select>${hint}</label>`;
     case 'checkbox': return `<label class="check full"><input type="checkbox" name="${f.k}"${v ? ' checked' : ''}> ${esc(f.l)}</label>`;
     case 'checks': return `<div class="fld full">${lab}<div class="checks">${f.opts.length ? f.opts.map(([ov, ol]) => `<label class="check"><input type="checkbox" name="${f.k}" value="${esc(ov)}"${(v || []).includes(ov) ? ' checked' : ''}> ${esc(ol)}</label>`).join('') : '<span class="muted">Nenhum item disponível.</span>'}</div>${hint}</div>`;
+    case 'faixas': {
+      const rows = [...(v || []), ...Array(Math.max(0, 5 - (v || []).length)).fill({})].slice(0, 5);
+      return `<div class="fld full" data-faixas="${f.k}">${lab}<div class="tw"><table class="faixas"><thead><tr><th>A partir de (R$)</th><th>Cobra</th><th>Valor</th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+        <td><input name="${f.k}_de_${i}" inputmode="decimal" placeholder="${i ? '' : '0,00'}" value="${hasVal(r.de) ? esc(String(r.de).replace('.', ',')) : ''}"></td>
+        <td><select name="${f.k}_tipo_${i}">${optsHTML([['percentual', '% do valor'], ['fixo', 'R$ fixo']], r.tipo || 'percentual')}</select></td>
+        <td><input name="${f.k}_valor_${i}" inputmode="decimal" placeholder="${i ? '' : '0'}" value="${hasVal(r.valor) ? esc(String(r.valor).replace('.', ',')) : ''}"></td></tr>`).join('')}</tbody></table></div>${hint}</div>`;
+    }
     case 'file': return `<label class="fld${full}">${lab}<input type="file" name="${f.k}" accept="${esc(f.accept || '')}"${req}>${hint}</label>`;
     case 'money': return `<label class="fld${full}">${lab}<input name="${f.k}" inputmode="decimal" placeholder="0,00" value="${v === '' || v == null ? '' : esc(String(v).replace('.', ','))}"${req}>${hint}</label>`;
     default: return `<label class="fld${full}">${lab}<input type="${f.t || 'text'}" name="${f.k}" value="${esc(v ?? '')}"${req}${f.t === 'number' ? ' step="any"' : ''} placeholder="${esc(f.ph || '')}">${hint}</label>`;
@@ -960,13 +985,22 @@ function readForm(form, fields) {
   for (const f of fields) {
     if (!f.k) continue;
     if (f.t === 'checkbox') o[f.k] = !!form.querySelector(`[name="${f.k}"]`)?.checked;
+    else if (f.t === 'faixas') {
+      o[f.k] = [];
+      for (let i = 0; i < 5; i++) {
+        const de = (form.elements[`${f.k}_de_${i}`]?.value || '').trim(), val = (form.elements[`${f.k}_valor_${i}`]?.value || '').trim();
+        if (de === '' && val === '') continue;
+        o[f.k].push({ de: num(de), tipo: form.elements[`${f.k}_tipo_${i}`].value, valor: num(val) });
+      }
+      o[f.k].sort((a, b) => a.de - b.de);
+    }
     else if (f.t === 'file') o[f.k] = form.elements[f.k]?.files?.[0] || null;
     else if (f.t === 'checks') o[f.k] = $$(`[name="${f.k}"]:checked`, form).map(e => e.value);
     else { const v = (form.elements[f.k]?.value ?? '').trim(); o[f.k] = f.t === 'money' ? (v === '' ? '' : num(v)) : v; }
   }
   return o;
 }
-function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 'Salvar' }) {
+function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 'Salvar', onRender }) {
   const dlg = $('#dlg');
   dlg.innerHTML = `<form class="dlg" novalidate><h2>${esc(title)}</h2>${intro}<div class="grid">${fields.map(f => fieldHTML(f, values[f.k])).join('')}</div>
     <div class="foot"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">${esc(saveLabel)}</button></div></form>`;
@@ -978,6 +1012,7 @@ function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 
     const r = await onSave(readForm(form, fields), form);
     if (r !== false) dlg.close();
   };
+  onRender?.(form);
   dlg.showModal();
   $('input:not([type=checkbox]),select,textarea', form)?.focus();
 }
@@ -1221,16 +1256,26 @@ function docsCard(p) {
 /* plataformas e repasses */
 const platFields = () => [
   { k: 'nome', l: 'Nome da plataforma', req: true, w: 'full' },
-  { k: 'tipo', l: 'Como cobra', t: 'select', opts: [['fixo', 'Valor fixo por atendimento'], ['percentual', 'Percentual do valor da sessão']] },
-  { k: 'valor', l: 'Valor (R$) ou percentual (%)', t: 'money', req: true },
+  { k: 'tipo', l: 'Como cobra', t: 'select', opts: [['fixo', 'Valor fixo por atendimento'], ['percentual', 'Percentual do valor da sessão'], ['faixas', 'Por faixa de valor da sessão']] },
+  { k: 'valor', l: 'Valor (R$) ou percentual (%)', t: 'money' },
+  { k: 'faixas', l: 'Faixas', t: 'faixas', hint: 'Cada linha vale a partir do valor indicado até a próxima linha. Use valor 0 para “não cobra”. Ex.: a partir de 0 → 0%; a partir de 40 → 10%; a partir de 60 → 15%.' },
   { k: 'contato', l: 'Contato / forma de pagar o repasse', w: 'full', ph: 'Ex.: Pix fin@plataforma.com, até o dia 10' },
   { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
 ];
-actions['new-plat'] = () => openForm({ title: 'Nova plataforma', fields: platFields(), values: { tipo: 'fixo' },
-  onSave: async v => { db.settings.plataformas.push({ id: 'pl' + uid().replace(/-/g, '').slice(0, 8), ...v }); await commit('Plataforma cadastrada. Agora vincule os pacientes em Editar dados.'); } });
-actions['edit-plat'] = ({ id }) => { const pl = PLAT(id); openForm({ title: 'Editar plataforma', fields: platFields(), values: pl,
+function platFormUI(form) {  // mostra só o campo que vale para o tipo escolhido
+  const sync = () => { const fx = form.tipo.value === 'faixas'; $('[data-faixas]', form).hidden = fx ? false : true; form.valor.closest('.fld').hidden = fx; };
+  form.tipo.addEventListener('change', sync); sync();
+}
+function platValid(v) {
+  if (v.tipo === 'faixas') { if (!v.faixas.length) { notice('Preencha pelo menos uma faixa.'); return false; } if (v.faixas[0].de > 0) v.faixas.unshift({ de: 0, tipo: 'fixo', valor: 0 }); v.valor = ''; }
+  else { if (!hasVal(v.valor)) { notice('Informe o valor ou o percentual.'); return false; } v.faixas = []; }
+  return true;
+}
+actions['new-plat'] = () => openForm({ title: 'Nova plataforma', fields: platFields(), values: { tipo: 'fixo' }, onRender: platFormUI,
+  onSave: async v => { if (!platValid(v)) return false; db.settings.plataformas.push({ id: 'pl' + uid().replace(/-/g, '').slice(0, 8), ...v }); await commit('Plataforma cadastrada. Agora vincule os pacientes em Editar dados.'); } });
+actions['edit-plat'] = ({ id }) => { const pl = PLAT(id); openForm({ title: 'Editar plataforma', fields: platFields(), values: pl, onRender: platFormUI,
   intro: '<p class="muted">Mudar a regra vale para as sessões futuras. Atendimentos já feitos mantêm o repasse da época.</p>',
-  onSave: async v => { db.patients.filter(p => p.plataformaId === id).forEach(freezePastRepasse); Object.assign(pl, v); db.patients.filter(p => p.plataformaId === id).forEach(refreshFutureRepasse); await commit('Plataforma atualizada.'); } }); };
+  onSave: async v => { if (!platValid(v)) return false; db.patients.filter(p => p.plataformaId === id).forEach(freezePastRepasse); Object.assign(pl, v); db.patients.filter(p => p.plataformaId === id).forEach(refreshFutureRepasse); await commit('Plataforma atualizada.'); } }); };
 actions['del-plat'] = async ({ id }) => {
   const pl = PLAT(id), n = db.patients.filter(p => p.plataformaId === id).length, pg = db.repassesPagos.filter(r => r.plataformaId === id).length;
   if (n || pg) { notice('Esta plataforma está em uso', `${n ? `${n} paciente(s) estão vinculados a ela` : ''}${n && pg ? ' e ' : ''}${pg ? `há ${pg} pagamento(s) de repasse registrados` : ''}. Para manter o histórico certo, ela não pode ser excluída. Você pode tirar a plataforma dos pacientes em Editar dados.`); return; }
@@ -1353,7 +1398,7 @@ actions['change-serie'] = ({ pid, sid }) => {
 function newSession(pid, preset = {}) {
   const p = P(pid);
   openForm({
-    title: `Agendar — ${p.nome}`, fields: sessionFields(true),
+    title: `Agendar — ${p.nome}`, fields: sessionFields(true), onRender: repasseLive(p),
     values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, repasse: p.plataformaId ? repasseRate(p, p.valor) : '', status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
     onSave: async v => {
       const rep = v.repeticao; delete v.repeticao; v.link = normUrl(v.link);
@@ -1373,7 +1418,15 @@ function newSession(pid, preset = {}) {
 }
 actions['new-session'] = ({ pid }) => pid ? newSession(pid) : pickPatient('Agendar sessão', newSession);
 const S = id => db.sessions.find(s => s.id === id);
-actions['edit-session'] = ({ id }) => { const s = S(id), sp = P(s.pacienteId); openForm({ title: `Editar sessão — ${sp.nome}`, fields: sessionFields(false),
+function repasseLive(p) {  // ao mudar o valor da sessão, o repasse sugerido acompanha (se não foi digitado à mão)
+  return form => {
+    if (!form.repasse || !(p.plataformaId)) return;
+    let manual = false;
+    form.repasse.addEventListener('input', () => { manual = true; });
+    form.valor.addEventListener('input', () => { if (!manual) form.repasse.value = String(repasseRate(p, num(form.valor.value))).replace('.', ','); });
+  };
+}
+actions['edit-session'] = ({ id }) => { const s = S(id), sp = P(s.pacienteId); openForm({ title: `Editar sessão — ${sp.nome}`, fields: sessionFields(false), onRender: repasseLive(sp),
   values: { ...s, repasse: hasVal(s.repasse) ? s.repasse : (platOf(s) ? repasseRate(sp, s.valor) : '') },
   onSave: async v => { v.link = normUrl(v.link);
     const pl = s.plataformaId !== undefined ? s.plataformaId : sp.plataformaId;
