@@ -416,6 +416,12 @@ function migrate(d) {
   for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais' }, d.settings || {});
   if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
+  if (!d.settings.platSeed) {  // plataformas da Duda já vêm com as regras (uma vez só; se excluídas, não voltam)
+    d.settings.platSeed = 1;
+    const has = n => d.settings.plataformas.some(x => String(x.nome || '').toLowerCase().includes(n));
+    if (!has('sameca')) d.settings.plataformas.push({ id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] });
+    if (!has('recanto')) d.settings.plataformas.push({ id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] });
+  }
   for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.docs ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
 }
@@ -442,7 +448,7 @@ function repasseRate(p, valor) {
 }
 const platOf = s => s.plataformaId !== undefined ? s.plataformaId : P(s.pacienteId)?.plataformaId;
 const repasseOf = s => !billable(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
-function stampRepasse(s, p) { if (p?.plataformaId) { s.plataformaId = p.plataformaId; s.repasse = repasseRate(p, s.valor); } else { s.plataformaId = ''; delete s.repasse; } return s; }
+function stampRepasse(s, p) { if (s.repasseManual) return s; if (p?.plataformaId) { s.plataformaId = p.plataformaId; s.repasse = repasseRate(p, s.valor); } else { s.plataformaId = ''; delete s.repasse; } return s; }
 function freezePastRepasse(p) { sessOf(p.id).filter(s => s.plataformaId === undefined && s.status !== 'agendado').forEach(s => stampRepasse(s, p)); }  // antes de mudar a regra, fixa a dos atendimentos já feitos
 function refreshFutureRepasse(p) { sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today()).forEach(s => stampRepasse(s, p)); }
 const pct = v => `${String(num(v)).replace('.', ',')}%`;
@@ -1111,18 +1117,26 @@ function patientFields() {
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online', 'Híbrido'] },
     { k: 'encaminhadoPor', l: 'Encaminhado(a) por' },
     { k: 'plataformaId', l: 'Veio por plataforma', t: 'select', opts: [['', 'Não (particular)'], ...(db.settings.plataformas || []).map(pl => [pl.id, `${pl.nome} — ${platRegra(pl)}`])],
-      hint: (db.settings.plataformas || []).length ? 'O repasse à plataforma é calculado em cada atendimento.' : 'Cadastre as plataformas em Financeiro → Plataformas e repasses.' },
-    { k: 'repasse', l: 'Repasse por atendimento para este paciente (R$)', t: 'money', hint: 'Deixe em branco para usar a regra da plataforma.' },
+      hint: 'Só isso: o repasse de cada atendimento é calculado sozinho pela regra da plataforma.' },
+    { k: 'repasseDif', l: 'Este paciente tem um repasse combinado diferente da regra da plataforma', t: 'checkbox' },
+    { k: 'repasse', l: 'Repasse combinado por atendimento (R$)', t: 'money' },
     { k: 'convenio', l: 'Convênio / particular', ph: 'Particular' },
     { k: 'linkChamada', l: 'Link fixo da chamada (Google Meet, Zoom…)', w: 'full', ph: 'meet.google.com/abc-defg-hij' },
     { k: 'cobrarFalta', l: 'Cobrar faltas sem aviso prévio (padrão para este paciente)', t: 'checkbox' },
     { k: 'obs', l: 'Observações gerais', t: 'textarea', rows: 3 },
   ];
 }
+function patientFormUI(form) {  // o repasse diferente só aparece se houver plataforma e a caixa for marcada
+  const chk = form.querySelector('[name=repasseDif]'), row = form.repasse.closest('.fld'), chkRow = chk.closest('.check');
+  const sync = () => { const pl = !!form.plataformaId.value; chkRow.hidden = !pl; row.hidden = !(pl && chk.checked); };
+  form.plataformaId.addEventListener('change', sync); chk.addEventListener('change', sync); sync();
+}
+function cleanRepasse(v) { if (!v.plataformaId || !v.repasseDif) v.repasse = ''; delete v.repasseDif; }
 actions['new-patient'] = () => openForm({
-  title: 'Novo paciente', fields: patientFields(),
+  title: 'Novo paciente', fields: patientFields(), onRender: patientFormUI,
   values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true },
   onSave: async v => {
+    cleanRepasse(v);
     v.linkChamada = normUrl(v.linkChamada);
     const p = { id: uid(), ...v, responsaveis: [], series: [], docs: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
     db.patients.push(p);
@@ -1132,7 +1146,8 @@ actions['new-patient'] = () => openForm({
 });
 actions['edit-patient'] = ({ id }) => {
   const p = P(id);
-  openForm({ title: 'Editar paciente', fields: patientFields(), values: p, onSave: async v => {
+  openForm({ title: 'Editar paciente', fields: patientFields(), values: { ...p, repasseDif: hasVal(p.repasse) }, onRender: patientFormUI, onSave: async v => {
+    cleanRepasse(v);
     const antes = { status: p.status, valor: p.valor };
     p.series ||= [];
     v.linkChamada = normUrl(v.linkChamada);
@@ -1321,7 +1336,6 @@ function sessionFields(isNew) {
     { k: 'data', l: 'Data', t: 'date', req: true }, { k: 'hora', l: 'Horário', t: 'time' },
     { k: 'duracao', l: 'Duração (min)', t: 'number' }, { k: 'valor', l: 'Valor (R$)', t: 'money' },
     { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(S_STATUS) },
-    { k: 'repasse', l: 'Repasse à plataforma (R$)', t: 'money', hint: 'Preenchido pela regra da plataforma do paciente. Em branco = sem repasse.' },
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online'] },
     { k: 'cobrar', l: 'Cobrar mesmo sendo falta/cancelamento', t: 'checkbox' },
     { k: 'motivo', l: 'Motivo (falta, cancelamento ou reagendamento)', w: 'full' },
@@ -1399,15 +1413,14 @@ function newSession(pid, preset = {}) {
   const p = P(pid);
   openForm({
     title: `Agendar — ${p.nome}`, fields: sessionFields(true), onRender: repasseLive(p),
-    values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, repasse: p.plataformaId ? repasseRate(p, p.valor) : '', status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
+    values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
     onSave: async v => {
       const rep = v.repeticao; delete v.repeticao; v.link = normUrl(v.link);
       if (!rep) {
         const ns = { id: uid(), pacienteId: pid, ...v };
-        if (p.plataformaId) { ns.plataformaId = p.plataformaId; ns.repasse = hasVal(v.repasse) ? v.repasse : 0; } else { ns.plataformaId = ''; delete ns.repasse; }
+        stampRepasse(ns, p);
         db.sessions.push(ns); await commit('Sessão salva.'); return;
       }
-      delete v.repasse;  // no horário fixo o repasse vem da regra do paciente
       if (p.status !== 'ativo') { notice('Paciente não está ativo', 'O horário fixo só cria sessões para pacientes com situação “Ativo”. Mude a situação em Editar dados.'); return false; }
       const sr = newSerie(p, { ...v, repeticao: rep });
       const first = S(`${sr.id}-${v.data}`);  // a primeira sessão recebe o que foi preenchido no formulário
@@ -1418,19 +1431,33 @@ function newSession(pid, preset = {}) {
 }
 actions['new-session'] = ({ pid }) => pid ? newSession(pid) : pickPatient('Agendar sessão', newSession);
 const S = id => db.sessions.find(s => s.id === id);
-function repasseLive(p) {  // ao mudar o valor da sessão, o repasse sugerido acompanha (se não foi digitado à mão)
+function rateFor(s, valor) {  // regra da plataforma a que a sessão pertence (a do paciente, ou a gravada na sessão)
+  const sp = P(s.pacienteId), pl = platOf(s);
+  return pl ? repasseRate({ plataformaId: pl, repasse: sp?.plataformaId === pl ? sp.repasse : '' }, valor) : 0;
+}
+function repasseLive(p, s) {  // mostra, sem campo para preencher, o repasse calculado; acompanha o valor digitado
   return form => {
-    if (!form.repasse || !(p.plataformaId)) return;
-    let manual = false;
-    form.repasse.addEventListener('input', () => { manual = true; });
-    form.valor.addEventListener('input', () => { if (!manual) form.repasse.value = String(repasseRate(p, num(form.valor.value))).replace('.', ','); });
+    const pl = PLAT(s ? platOf(s) : p.plataformaId); if (!pl || !form.valor) return;
+    const info = document.createElement('p'); info.className = 'muted'; form.querySelector('.grid').before(info);
+    const upd = () => { info.innerHTML = s?.repasseManual ? `Repasse (${esc(pl.nome)}): <b>${money(s.repasse)}</b>, ajustado à mão.` : `Repasse (${esc(pl.nome)}): <b>${money(s ? rateFor(s, num(form.valor.value)) : repasseRate(p, num(form.valor.value)))}</b>, calculado automaticamente.`; };
+    form.valor.addEventListener('input', upd); upd();
   };
 }
-actions['edit-session'] = ({ id }) => { const s = S(id), sp = P(s.pacienteId); openForm({ title: `Editar sessão — ${sp.nome}`, fields: sessionFields(false), onRender: repasseLive(sp),
-  values: { ...s, repasse: hasVal(s.repasse) ? s.repasse : (platOf(s) ? repasseRate(sp, s.valor) : '') },
+actions['adj-rep'] = ({ id }) => {
+  const s = S(id), pl = PLAT(platOf(s)), auto = rateFor(s, s.valor);
+  openForm({ title: 'Ajustar repasse desta sessão', saveLabel: 'Salvar',
+    intro: `<p class="muted">Pela regra de ${esc(pl?.nome || 'plataforma')}, o repasse desta sessão é <b>${money(auto)}</b>. Preencha só se esta sessão for uma exceção. Deixe em branco para voltar ao automático.</p>`,
+    fields: [{ k: 'repasse', l: 'Repasse desta sessão (R$)', t: 'money' }], values: { repasse: s.repasseManual ? s.repasse : '' },
+    onSave: async v => {
+      if (hasVal(v.repasse)) { s.repasse = v.repasse; s.repasseManual = true; } else { delete s.repasseManual; s.repasse = auto; }
+      s.plataformaId = platOf(s) || '';
+      await commit('Repasse atualizado.');
+    } });
+};
+actions['edit-session'] = ({ id }) => { const s = S(id), sp = P(s.pacienteId); openForm({ title: `Editar sessão — ${sp.nome}`, fields: sessionFields(false), onRender: repasseLive(sp, s), values: s,
   onSave: async v => { v.link = normUrl(v.link);
-    const pl = s.plataformaId !== undefined ? s.plataformaId : sp.plataformaId;
-    if (pl) { s.plataformaId = pl; if (!hasVal(v.repasse)) v.repasse = 0; } else if (!hasVal(v.repasse)) { delete v.repasse; delete s.repasse; } else s.plataformaId = '';
+    const pl = platOf(s);
+    if (pl) { s.plataformaId = pl; if (!s.repasseManual) s.repasse = rateFor(s, v.valor); }
     Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
 actions['del-session'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este atendimento?', text: 'Para faltas e cancelamentos, prefira mudar a situação e manter o histórico.', ok: 'Excluir', danger: true }))) return; db.sessions = db.sessions.filter(s => s.id !== id); await commit('Sessão excluída.'); };
 actions['sess-done'] = async ({ id }) => { S(id).status = 'realizado'; await commit('Marcada como realizada.'); };
@@ -1838,6 +1865,7 @@ function sessActs(s) {
     s.status === 'agendado' && ['sess-resched', 'Reagendar', { id: s.id }],
     (s.status === 'realizado' || s.status === 'falta') && ['new-record', 'Escrever no prontuário', { pid: s.pacienteId, sess: s.id }],
     ...sessOnlineItems(s),
+    PLAT(platOf(s)) && ['adj-rep', 'Ajustar repasse', { id: s.id }],
     ['edit-session', 'Editar', { id: s.id }],
     ['del-session', 'Excluir', { id: s.id }, 'danger'],
   ]);
