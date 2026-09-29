@@ -68,6 +68,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
 .btn.primary:hover { filter: brightness(1.07); }
 .btn.danger { color: var(--bad); }
 .btn.dangerfill { background: var(--bad); color: var(--bg); border-color: var(--bad); font-weight: 600; }
+.wa { display: inline-block; font-size: .75rem; font-weight: 600; padding: 1px 9px; border-radius: 999px; background: var(--ok-soft); color: var(--ok); white-space: nowrap; }
+.wa:hover { text-decoration: none; filter: brightness(.96); }
+.phone { white-space: nowrap; }
 .sync { font-size: .78rem; color: var(--muted); white-space: nowrap; }
 .sync.bad { color: var(--bad); }
 .btn.sm { padding: 3px 8px; font-size: .85rem; }
@@ -281,7 +284,18 @@ function ask(o) {
   });
 }
 const notice = (title, text = '') => ask({ title, text, ok: 'OK', alertOnly: true });
-function waLink(phone) { const d = digits(phone); if (d.length < 10) return ''; return `https://wa.me/${d.length <= 11 ? '55' + d : d}`; }
+/* WhatsApp: número com DDD (com ou sem +55) vira link direto para a conversa */
+function waLink(phone) {
+  const d = digits(phone).replace(/^0+/, '');
+  if (/^\s*\+/.test(phone)) return d.length >= 8 ? `https://wa.me/${d}` : '';  // com "+": já tem o código do país
+  if (d.length < 10) return '';
+  return `https://wa.me/${d.length <= 11 ? '55' + d : d}`;
+}
+function phoneHTML(phone) {
+  if (!phone) return '';
+  const w = waLink(phone);
+  return `<span class="phone">${esc(phone)}</span>${w ? ` <a class="wa" href="${w}" target="_blank" rel="noopener" title="Abrir conversa no WhatsApp">WhatsApp</a>` : ''}`;
+}
 
 /* valor por extenso (recibos) */
 const U = ['', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete', 'oito', 'nove', 'dez', 'onze', 'doze', 'treze', 'quatorze', 'quinze', 'dezesseis', 'dezessete', 'dezoito', 'dezenove'];
@@ -979,7 +993,7 @@ function patientFields() {
     { k: 'nomeSocial', l: 'Nome social / como prefere ser chamado(a)' },
     { k: 'nasc', l: 'Data de nascimento', t: 'date', hint: 'Menores de 18 anos ganham campos de responsáveis e lembrete mensal de contato.' },
     { k: 'cpf', l: 'CPF' }, { k: 'rg', l: 'RG' },
-    { k: 'genero', l: 'Gênero' }, { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel' },
+    { k: 'genero', l: 'Gênero' }, { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel', ph: '(11) 98888-7777', hint: 'Com DDD, para abrir o WhatsApp direto.' },
     { k: 'email', l: 'E-mail', t: 'email' }, { k: 'ocupacao', l: 'Escola / série ou ocupação' },
     { k: 'endereco', l: 'Endereço', w: 'full' },
     { k: 'emergencia', l: 'Contato de emergência', w: 'full' },
@@ -1131,7 +1145,7 @@ const guardianFields = () => [
   { k: 'nome', l: 'Nome completo', req: true, w: 'full' },
   { k: 'parentesco', l: 'Parentesco', t: 'select', opts: PARENTESCO },
   { k: 'cpf', l: 'CPF' }, { k: 'rg', l: 'RG' },
-  { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel' }, { k: 'email', l: 'E-mail', t: 'email' },
+  { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel', ph: '(11) 98888-7777', hint: 'Com DDD, para abrir o WhatsApp direto.' }, { k: 'email', l: 'E-mail', t: 'email' },
   { k: 'profissao', l: 'Profissão' },
   { k: 'endereco', l: 'Endereço (se diferente do paciente)', w: 'full' },
   { k: 'financeiro', l: 'Responsável financeiro (pagador / tomador da nota fiscal)', t: 'checkbox' },
@@ -1596,7 +1610,7 @@ function contactBadge(dias) {
   return badge(`em ${dias} dias`, 'ok');
 }
 function guardiansInline(p) {
-  return p.responsaveis.map(r => { const w = waLink(r.telefone); return `<div>${esc(r.nome)} <span class="muted">(${esc(r.parentesco || '')})</span>${r.telefone ? ` · ${w ? `<a href="${w}" target="_blank" rel="noopener">${esc(r.telefone)}</a>` : esc(r.telefone)}` : ''}</div>`; }).join('') || '<span class="muted">Nenhum responsável cadastrado</span>';
+  return p.responsaveis.map(r => { return `<div>${esc(r.nome)} <span class="muted">(${esc(r.parentesco || '')})</span>${r.telefone ? ` · ${phoneHTML(r.telefone)}` : ''}</div>`; }).join('') || '<span class="muted">Nenhum responsável cadastrado</span>';
 }
 
 /* ---------- telas ---------- */
@@ -1635,7 +1649,7 @@ function vDashboard() {
     <div class="cols">
       <div class="card"><h2>Próximos 7 dias</h2>${sessTable(upcoming)}</div>
       <div>
-        <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
+        <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${(() => { const r = c.p.responsaveis.find(r => waLink(r.telefone)); return r ? `<a class="wa" href="${waLink(r.telefone)}" target="_blank" rel="noopener" title="WhatsApp de ${esc(r.nome)}">WhatsApp ${esc(r.nome.split(' ')[0])}</a>` : ''; })()}</td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
         <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<div class="empty">Tudo em dia. 🌿</div>'}</div>
         ${owing.length ? `<div class="card"><h2>Saldos em aberto</h2><div class="tw"><table><tbody>${owing.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.bal)}</td><td class="acts"><button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
       </div>
@@ -1654,7 +1668,7 @@ function vPatients() {
       const a = age(p.nasc), ns = nextSession(p.id), b = balance(p.id);
       return `<tr><td><a href="#/p/${p.id}/dados"><b>${esc(p.nome)}</b></a>${p.nomeSocial ? `<div class="muted">${esc(p.nomeSocial)}</div>` : ''}</td>
         <td>${a ?? '—'}${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>
-        <td>${isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${esc(p.responsaveis[0].telefone || '')}</div>` : esc(p.telefone || '')}</td>
+        <td>${isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${phoneHTML(p.responsaveis[0].telefone)}</div>` : phoneHTML(p.telefone)}</td>
         <td>${ns ? `${fmtDW(ns.data)} <span class="muted">${esc(ns.hora || '')}</span>` : '<span class="muted">—</span>'}</td>
         <td class="num">${b.bal > 0.005 ? `<span style="color:var(--warn)">${money(b.bal)}</span>` : b.bal < -0.005 ? `<span class="muted">crédito ${money(-b.bal)}</span>` : '<span class="muted">em dia</span>'}</td>
         <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}${p.status === 'ativo' && !hasContract(p) ? ' ' + badge('sem contrato', 'warn') : ''}</td></tr>`;
@@ -1686,7 +1700,7 @@ function tDados(p) {
   return `<div class="cols">
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
       <dl class="kv">${kv('Nome', esc(p.nome))}${kv('Nome social', esc(p.nomeSocial))}${kv('Nascimento', p.nasc ? `${fmtD(p.nasc)} (${age(p.nasc)} anos)` : '')}${kv('CPF', esc(p.cpf))}${kv('RG', esc(p.rg))}${kv('Gênero', esc(p.genero))}
-      ${kv('Telefone', p.telefone ? (waLink(p.telefone) ? `<a href="${waLink(p.telefone)}" target="_blank" rel="noopener">${esc(p.telefone)}</a>` : esc(p.telefone)) : '')}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
+      ${kv('Telefone', phoneHTML(p.telefone))}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
     <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
@@ -1695,7 +1709,7 @@ function tDados(p) {
     ${minor && !p.responsaveis.length ? '<div class="alert">Paciente menor de idade: cadastre pelo menos um responsável legal.</div>' : ''}
     <div class="cols">${p.responsaveis.map(r => `<div class="gcard"><div class="row" style="justify-content:space-between"><b>${esc(r.nome)}</b>${menu([['edit-guardian', 'Editar', { pid: p.id, id: r.id }], ['del-guardian', 'Remover', { pid: p.id, id: r.id }, 'danger']])}</div>
       <div class="row" style="margin:4px 0">${badge(r.parentesco || 'responsável')}${r.financeiro ? badge('financeiro', 'ok') : ''}${r.guarda ? badge('guarda / autoriza', 'info') : ''}</div>
-      <dl class="kv">${kv('CPF', esc(r.cpf))}${kv('RG', esc(r.rg))}${kv('Telefone', r.telefone ? (waLink(r.telefone) ? `<a href="${waLink(r.telefone)}" target="_blank" rel="noopener">${esc(r.telefone)}</a>` : esc(r.telefone)) : '')}${kv('E-mail', esc(r.email))}${kv('Profissão', esc(r.profissao))}${kv('Endereço', esc(r.endereco))}</dl>
+      <dl class="kv">${kv('CPF', esc(r.cpf))}${kv('RG', esc(r.rg))}${kv('Telefone', phoneHTML(r.telefone))}${kv('E-mail', esc(r.email))}${kv('Profissão', esc(r.profissao))}${kv('Endereço', esc(r.endereco))}</dl>
       ${r.obs ? `<div class="muted pre">${esc(r.obs)}</div>` : ''}</div>`).join('') || (minor ? '' : '<div class="empty">Nenhum responsável cadastrado.</div>')}</div></div>`;
 }
 function seriesCard(p) {
