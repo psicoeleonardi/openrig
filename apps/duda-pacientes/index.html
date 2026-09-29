@@ -1117,7 +1117,7 @@ function patientFields() {
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online', 'Híbrido'] },
     { k: 'encaminhadoPor', l: 'Encaminhado(a) por' },
     { k: 'plataformaId', l: 'Veio por plataforma', t: 'select', opts: [['', 'Não (particular)'], ...(db.settings.plataformas || []).map(pl => [pl.id, `${pl.nome} — ${platRegra(pl)}`])],
-      hint: 'Só isso: o repasse de cada atendimento é calculado sozinho pela regra da plataforma.' },
+      hint: 'Só isso: o repasse de cada atendimento é calculado sozinho. Para mudar o percentual ou os valores, use Financeiro → Plataformas → Editar regra.' },
     { k: 'repasseDif', l: 'Este paciente tem um repasse combinado diferente da regra da plataforma', t: 'checkbox' },
     { k: 'repasse', l: 'Repasse combinado por atendimento (R$)', t: 'money' },
     { k: 'convenio', l: 'Convênio / particular', ph: 'Particular' },
@@ -2148,7 +2148,7 @@ function platCard(reps, repPagosMes, month) {
     ${reps.length ? `<div class="tw"><table><thead><tr><th>Plataforma</th><th>Regra</th><th class="num">Repasse em ${esc(MONTHS[Number(month.slice(5)) - 1])}</th><th class="num">A pagar (total)</th><th></th></tr></thead><tbody>${reps.map(r => `<tr>
       <td><b>${esc(r.pl.nome)}</b><div class="muted">${r.pacientes} paciente(s) ativo(s)${r.pl.contato ? ' · ' + esc(r.pl.contato) : ''}</div></td><td>${esc(platRegra(r.pl))}</td>
       <td class="num">${money(r.mes)}</td><td class="num">${r.saldo > 0.005 ? `<b style="color:var(--warn)">${money(r.saldo)}</b>` : r.saldo < -0.005 ? `<span class="muted">crédito ${money(-r.saldo)}</span>` : '<span class="muted">em dia</span>'}</td>
-      <td class="acts">${r.saldo > 0.005 ? `<button class="btn sm" data-act="pay-plat" data-id="${r.pl.id}">Pagar</button> ` : ''}${menu([['edit-plat', 'Editar', { id: r.pl.id }], ['del-plat', 'Excluir', { id: r.pl.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>
+      <td class="acts">${r.saldo > 0.005 ? `<button class="btn sm" data-act="pay-plat" data-id="${r.pl.id}">Pagar</button> ` : ''}<button class="btn sm" data-act="edit-plat" data-id="${r.pl.id}">Editar regra</button> ${menu([['del-plat', 'Excluir plataforma', { id: r.pl.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>
       ${repPagosMes.length ? `<h3 style="margin-top:14px">Repasses pagos em ${fmtMonth(month)}</h3><div class="tw"><table><tbody>${repPagosMes.map(r => `<tr><td>${fmtD(r.data)}</td><td>${esc(PLAT(r.plataformaId)?.nome || '—')}</td><td>${esc(r.forma || '')}${r.referencia ? `<div class="muted">${esc(r.referencia)}</div>` : ''}</td><td class="num">${money(r.valor)}</td><td class="acts">${menu([['edit-rep', 'Editar', { id: r.id }], ['del-rep', 'Excluir', { id: r.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>` : ''}`
       : '<p class="muted" style="margin:0">Cadastre aqui as plataformas que indicam pacientes e quanto cobram por atendimento. Depois, vincule cada paciente em Editar dados → “Veio por plataforma”.</p>'}</div>`;
 }
