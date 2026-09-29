@@ -447,9 +447,10 @@ function repasseRate(p, valor) {
   return pl.tipo === 'percentual' ? Math.round(num(valor) * num(pl.valor)) / 100 : num(pl.valor);
 }
 const platOf = s => s.plataformaId !== undefined ? s.plataformaId : P(s.pacienteId)?.plataformaId;
-const repasseOf = s => !billable(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
+const repasseOf = s => !billable(s) || !platOf(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);  // plataformaId '' = atendimento sem plataforma
 function stampRepasse(s, p) { if (s.repasseManual) return s; if (p?.plataformaId) { s.plataformaId = p.plataformaId; s.repasse = repasseRate(p, s.valor); } else { s.plataformaId = ''; delete s.repasse; } return s; }
 function freezePastRepasse(p) { sessOf(p.id).filter(s => s.plataformaId === undefined && s.status !== 'agendado').forEach(s => stampRepasse(s, p)); }  // antes de mudar a regra, fixa a dos atendimentos já feitos
+const semRepasse = p => !p.plataformaId ? [] : sessOf(p.id).filter(s => s.status !== 'agendado' && !s.repasseManual && (s.plataformaId || '') !== p.plataformaId);
 function refreshFutureRepasse(p) { sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today()).forEach(s => stampRepasse(s, p)); }
 const pct = v => `${String(num(v)).replace('.', ',')}%`;
 function faixaTxt(f) { return num(f.valor) === 0 ? 'não cobra' : f.tipo === 'percentual' ? pct(f.valor) : money(f.valor); }
@@ -1148,7 +1149,7 @@ actions['edit-patient'] = ({ id }) => {
   const p = P(id);
   openForm({ title: 'Editar paciente', fields: patientFields(), values: { ...p, repasseDif: hasVal(p.repasse) }, onRender: patientFormUI, onSave: async v => {
     cleanRepasse(v);
-    const antes = { status: p.status, valor: p.valor };
+    const antes = { status: p.status, valor: p.valor, plataformaId: p.plataformaId || '' };
     p.series ||= [];
     v.linkChamada = normUrl(v.linkChamada);
     freezePastRepasse(p);
@@ -1168,6 +1169,12 @@ actions['edit-patient'] = ({ id }) => {
       if (up.length) msg += ` Novo valor aplicado a ${up.length} sessão(ões) futura(s).`;
     }
     refreshFutureRepasse(p);
+    if (p.plataformaId && p.plataformaId !== antes.plataformaId) {  // esqueceu de marcar no começo? oferece aplicar ao que já foi atendido
+      const pl = PLAT(p.plataformaId), list = semRepasse(p);
+      if (list.length && await ask({ title: `${pl.nome} vale também para os atendimentos anteriores?`, text: `${p.nome} tem ${list.length} atendimento(s) já registrados sem o repasse de ${pl.nome}. Se ${p.nome.split(' ')[0]} sempre veio por ${pl.nome}, aplique a todos. Se veio para ${pl.nome} só agora, deixe só daqui para frente.`, ok: 'Aplicar a todos', cancel: 'Só daqui para frente' })) {
+        list.forEach(s => stampRepasse(s, p)); msg += ` Repasse aplicado a ${list.length} atendimento(s) anteriores.`;
+      }
+    }
     await commit(msg);
   } });
 };
@@ -1443,6 +1450,13 @@ function repasseLive(p, s) {  // mostra, sem campo para preencher, o repasse cal
     form.valor.addEventListener('input', upd); upd();
   };
 }
+actions['apply-plat-past'] = async ({ pid }) => {
+  const p = P(pid), pl = PLAT(p.plataformaId), list = semRepasse(p); if (!pl || !list.length) return;
+  const outra = list.filter(s => s.plataformaId && PLAT(s.plataformaId)).length;
+  if (!(await ask({ title: `Aplicar ${pl.nome} aos atendimentos anteriores?`, text: `${list.length} atendimento(s) de ${p.nome} já registrados estão ${outra ? 'sem repasse ou com outra plataforma' : 'sem repasse'}. Eles passam a seguir a regra de ${pl.nome} (${platRegra(pl)}).`, ok: 'Aplicar' }))) return;
+  list.forEach(s => stampRepasse(s, p));
+  await commit(`Repasse de ${pl.nome} aplicado a ${list.length} atendimento(s).`);
+};
 actions['adj-rep'] = ({ id }) => {
   const s = S(id), pl = PLAT(platOf(s)), auto = rateFor(s, s.valor);
   openForm({ title: 'Ajustar repasse desta sessão', saveLabel: 'Salvar',
@@ -2078,8 +2092,9 @@ function tAtend(p) {
 }
 function tFin(p) {
   const b = balance(p.id), pays = paysOf(p.id).sort((a, b) => b.data.localeCompare(a.data)), invs = invsOf(p.id).sort((a, b) => (b.dataEmissao || b.competencia || '').localeCompare(a.dataEmissao || a.competencia || ''));
-  const pl = PLAT(p.plataformaId), rep = sum(sessOf(p.id), repasseOf);
-  return `${pl || rep ? `<div class="alert info">${pl ? `Paciente da plataforma <b>${esc(pl.nome)}</b> · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}. ` : ''}Total de repasses deste paciente: <b>${money(rep)}</b> · líquido para você: <b>${money(b.due - rep)}</b>.</div>` : ''}
+  const pl = PLAT(p.plataformaId), rep = sum(sessOf(p.id), repasseOf), faltam = semRepasse(p).filter(billable);
+  return `${faltam.length ? `<div class="alert">${faltam.length} atendimento(s) anteriores estão sem o repasse de ${esc(pl.nome)} (provavelmente foram registrados antes de marcar a plataforma). <button class="btn sm" data-act="apply-plat-past" data-pid="${p.id}">Aplicar repasse</button></div>` : ''}
+  ${pl || rep ? `<div class="alert info">${pl ? `Paciente da plataforma <b>${esc(pl.nome)}</b> · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}. ` : ''}Total de repasses deste paciente: <b>${money(rep)}</b> · líquido para você: <b>${money(b.due - rep)}</b>.</div>` : ''}
   <div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável (sessões)</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
     <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div>${payTable(pays, { showPat: false })}</div>
@@ -2144,7 +2159,11 @@ function vAgenda() {
 actions['ag-range'] = ({ a, b }) => { ui.agFrom = a; ui.agTo = b; render(); };
 
 function platCard(reps, repPagosMes, month) {
+  const pend = db.patients.map(p => ({ p, n: semRepasse(p).filter(billable).length })).filter(x => x.n);
+  const semVinculo = reps.length && !db.patients.some(p => p.plataformaId);
   return `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Plataformas e repasses</h2><div class="actions">${reps.length ? '<button class="btn sm" data-act="pay-plat">Registrar pagamento</button>' : ''}<button class="btn sm primary" data-act="new-plat">+ Plataforma</button></div></div>
+    ${pend.length ? `<div class="alert">Atendimentos registrados antes de marcar a plataforma do paciente estão sem repasse:${pend.map(x => `<div class="row" style="justify-content:space-between;margin-top:6px"><span><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a>: ${x.n} atendimento(s) · ${esc(PLAT(x.p.plataformaId).nome)}</span><button class="btn sm" data-act="apply-plat-past" data-pid="${x.p.id}">Aplicar repasse</button></div>`).join('')}</div>` : ''}
+    ${semVinculo ? '<div class="alert info">Nenhum paciente está vinculado a uma plataforma ainda, por isso os repasses estão zerados. Em cada paciente, use Editar dados → “Veio por plataforma”.</div>' : ''}
     ${reps.length ? `<div class="tw"><table><thead><tr><th>Plataforma</th><th>Regra</th><th class="num">Repasse em ${esc(MONTHS[Number(month.slice(5)) - 1])}</th><th class="num">A pagar (total)</th><th></th></tr></thead><tbody>${reps.map(r => `<tr>
       <td><b>${esc(r.pl.nome)}</b><div class="muted">${r.pacientes} paciente(s) ativo(s)${r.pl.contato ? ' · ' + esc(r.pl.contato) : ''}</div></td><td>${esc(platRegra(r.pl))}</td>
       <td class="num">${money(r.mes)}</td><td class="num">${r.saldo > 0.005 ? `<b style="color:var(--warn)">${money(r.saldo)}</b>` : r.saldo < -0.005 ? `<span class="muted">crédito ${money(-r.saldo)}</span>` : '<span class="muted">em dia</span>'}</td>
