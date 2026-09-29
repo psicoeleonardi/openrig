@@ -355,7 +355,7 @@ function emptyDB() {
 function migrate(d) {
   for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL }, d.settings || {});
-  for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
+  for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.docs ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
 }
 const P = id => db.patients.find(p => p.id === id);
@@ -537,6 +537,52 @@ async function cloudWipe() {
   const all = await cloud.collection(cbase()).get();
   for (const d of all.docs) { try { await cloud.doc(cpath(d.id)).delete(); } catch {} }
 }
+/* anexos: cada arquivo tem a própria chave (guardada na ficha do paciente, que é protegida pela senha)
+   e é gravado uma vez só, à parte: "fm-<id>" com o tamanho e pedaços "fx-<id>-<n>" na nuvem, "file:<id>" no aparelho */
+let fileQueue = new Map();   // id do anexo -> conteúdo criptografado a enviar, ou null para apagar
+async function cloudPutFile(id, ct) {
+  const n = Math.max(1, Math.ceil(ct.length / CHUNK));
+  for (let i = 0; i < n; i++) await cloud.doc(cpath(`fx-${id}-${i}`)).set({ d: ct.slice(i * CHUNK, (i + 1) * CHUNK) });
+  await cloud.doc(cpath('fm-' + id)).set({ n, len: ct.length });
+}
+async function cloudGetFile(id) {
+  const m = await cloud.doc(cpath('fm-' + id)).get();
+  if (!m.exists) return null;
+  let ct = '';
+  for (let i = 0; i < m.data().n; i++) { const c = await cloud.doc(cpath(`fx-${id}-${i}`)).get(); if (!c.exists) return null; ct += c.data().d; }
+  return ct;
+}
+async function cloudDelFile(id) {
+  const m = await cloud.doc(cpath('fm-' + id)).get();
+  if (!m.exists) return;
+  await cloud.doc(cpath('fm-' + id)).delete();
+  for (let i = 0; i < m.data().n; i++) { try { await cloud.doc(cpath(`fx-${id}-${i}`)).delete(); } catch {} }
+}
+async function queueFile(id, ct) {  // ct = null apaga
+  const puts = {}, dels = [];
+  if (ct != null) puts['file:' + id] = { ct }; else dels.push('file:' + id);
+  if (cloud) { fileQueue.set(id, ct); const q = (await kv.get('fileq')) || {}; q[id] = ct != null ? 'up' : 'del'; puts.fileq = q; }
+  await kv.write(puts, dels);
+  if (cloud) scheduleCloud();
+}
+async function restoreFileQueue() {  // envios que ficaram pendentes (página fechada antes de terminar)
+  if (!cloud) return;
+  const q = (await kv.get('fileq')) || {};
+  for (const [id, op] of Object.entries(q)) {
+    if (op === 'del') fileQueue.set(id, null);
+    else { const r = await kv.get('file:' + id); if (r) fileQueue.set(id, r.ct); }
+  }
+  if (fileQueue.size) scheduleCloud();
+}
+async function getFileCt(id) {
+  const r = await kv.get('file:' + id);
+  if (r) return r.ct;
+  if (!cloud) return null;
+  const ct = await cloudGetFile(id);
+  if (ct) { try { await kv.write({ ['file:' + id]: { ct } }); } catch {} }
+  return ct;
+}
+
 /* formato antigo (um só cofre), lido uma vez para converter */
 function legacyLocal() { try { return JSON.parse(localStorage.getItem(STORE) || 'null'); } catch { return null; } }
 async function legacyCloud() {
@@ -560,31 +606,42 @@ function scheduleCloud() {
 async function flushCloud() {
   if (!cloud || !idx) return;
   if (cloudBusy) { clearTimeout(cloudTimer); cloudTimer = setTimeout(flushCloud, 800); return; }
-  if (!cloudQueue.size) return;
+  if (!cloudQueue.size && !fileQueue.size) return;
   cloudBusy = true; setSync('saving');
   const batch = [...cloudQueue]; cloudQueue = new Map();
+  const fbatch = [...fileQueue]; fileQueue = new Map();
   let lockMsg = '';
   try {
-    const ci = await cloudGetIndex();
-    if (ci && ci.salt !== idx.salt && (ci.saltAt || 0) > (idx.saltAt || 0)) { lockMsg = 'A senha foi alterada em outro aparelho. Entre com a nova senha.'; return; }
-    for (const [id, e] of batch) { if (e) await cloudPutPart(id, e); else await cloudDelPart(id); }
-    const merged = mergeIndex(ci, idx);
-    await cloud.doc(cpath('i')).set(merged);
-    cloudSeen = merged.savedAt;
+    // anexos primeiro: quando a ficha que os cita chegar ao outro aparelho, o arquivo já está lá
+    for (const [id, ct] of fbatch) { if (ct != null) await cloudPutFile(id, ct); else await cloudDelFile(id); }
+    if (fbatch.length) {
+      const q = (await kv.get('fileq')) || {};
+      for (const [id] of fbatch) if (!fileQueue.has(id)) delete q[id];
+      try { await kv.write({ fileq: q }); } catch {}
+    }
+    if (batch.length) {
+      const ci = await cloudGetIndex();
+      if (ci && ci.salt !== idx.salt && (ci.saltAt || 0) > (idx.saltAt || 0)) { lockMsg = 'A senha foi alterada em outro aparelho. Entre com a nova senha.'; return; }
+      for (const [id, e] of batch) { if (e) await cloudPutPart(id, e); else await cloudDelPart(id); }
+      const merged = mergeIndex(ci, idx);
+      await cloud.doc(cpath('i')).set(merged);
+      cloudSeen = merged.savedAt;
+    }
     if (legacyCleanup) {
       legacyCleanup = false;
       try { const all = await cloud.collection(cbase()).get(); for (const d of all.docs) if (d.id === 'vault' || d.id.startsWith('c-')) await cloud.doc(cpath(d.id)).delete(); } catch {}
     }
-    setSync(cloudQueue.size ? 'saving' : 'ok');
+    setSync(cloudQueue.size || fileQueue.size ? 'saving' : 'ok');
   } catch {
     for (const [id, e] of batch) if (!cloudQueue.has(id)) cloudQueue.set(id, e);
+    for (const [id, ct] of fbatch) if (!fileQueue.has(id)) fileQueue.set(id, ct);
     setSync('err'); clearTimeout(cloudTimer); cloudTimer = setTimeout(flushCloud, 15000);
     return;
   } finally {
     cloudBusy = false;
     if (lockMsg) showLock(lockMsg);
   }
-  if (cloudQueue.size) scheduleCloud();
+  if (cloudQueue.size || fileQueue.size) scheduleCloud();
 }
 
 /* salva só as partes que mudaram desde a última vez */
@@ -694,9 +751,9 @@ async function showLock(reason) {
 async function showLockNow(reason) {
   if (db && key) {  // antes de bloquear, termina de salvar e enviar o que estiver pendente
     try { await persisting; } catch {}
-    if (cloud && cloudQueue.size) { clearTimeout(cloudTimer); try { await flushCloud(); } catch {} }
+    if (cloud && (cloudQueue.size || fileQueue.size)) { clearTimeout(cloudTimer); try { await flushCloud(); } catch {} }
   }
-  db = null; key = null; salt = null; idx = null; savedJSON = {}; partSize = {};
+  db = null; key = null; salt = null; idx = null; savedJSON = {}; partSize = {}; fileQueue = new Map();
   const dlg = $('#dlg'); if (dlg.open) dlg.close();
   $('#main').innerHTML = '';
   $('#app').hidden = true;
@@ -737,7 +794,7 @@ async function showLockNow(reason) {
     </form>`;
   $('input', L)?.focus();
 }
-let pendingImport = null;
+let pendingImport = null, pendingFiles = null;
 document.addEventListener('submit', async e => {
   const f = e.target;
   if (f.id === 'unlockForm') {
@@ -768,9 +825,12 @@ document.addEventListener('submit', async e => {
     salt = crypto.getRandomValues(new Uint8Array(16));
     key = await deriveKey(f.pw1.value, salt);
     db = migrate(pendingImport || emptyDB()); pendingImport = null;
+    const files = pendingFiles; pendingFiles = null;
     idx = await newIndex(); savedJSON = {}; partSize = {}; cloudQueue = new Map();
     curRoute = db.settings.nome ? 'inicio' : 'config';
-    start(); await persist();
+    start();
+    for (const [id, ct] of Object.entries(files || {})) await queueFile(id, ct);
+    await persist();
     toast(db.patients.length ? 'Backup restaurado.' : 'Tudo pronto! Preencha seus dados profissionais.');
   } else if (f.dataset.submit) {
     e.preventDefault();
@@ -780,6 +840,7 @@ document.addEventListener('submit', async e => {
 
 function start() {
   if (topUpSeries()) persist();
+  restoreFileQueue().catch(() => {});
   $('#lock').hidden = true; $('#lock').innerHTML = '';
   $('#app').hidden = false;
   lastActive = Date.now();
@@ -805,6 +866,7 @@ function fieldHTML(f, v) {
     case 'select': return `<label class="fld${full}">${lab}<select name="${f.k}"${req}>${f.empty ? '<option value="">—</option>' : ''}${optsHTML(f.opts, v)}</select>${hint}</label>`;
     case 'checkbox': return `<label class="check full"><input type="checkbox" name="${f.k}"${v ? ' checked' : ''}> ${esc(f.l)}</label>`;
     case 'checks': return `<div class="fld full">${lab}<div class="checks">${f.opts.length ? f.opts.map(([ov, ol]) => `<label class="check"><input type="checkbox" name="${f.k}" value="${esc(ov)}"${(v || []).includes(ov) ? ' checked' : ''}> ${esc(ol)}</label>`).join('') : '<span class="muted">Nenhum item disponível.</span>'}</div>${hint}</div>`;
+    case 'file': return `<label class="fld${full}">${lab}<input type="file" name="${f.k}" accept="${esc(f.accept || '')}"${req}>${hint}</label>`;
     case 'money': return `<label class="fld${full}">${lab}<input name="${f.k}" inputmode="decimal" placeholder="0,00" value="${v === '' || v == null ? '' : esc(String(v).replace('.', ','))}"${req}>${hint}</label>`;
     default: return `<label class="fld${full}">${lab}<input type="${f.t || 'text'}" name="${f.k}" value="${esc(v ?? '')}"${req}${f.t === 'number' ? ' step="any"' : ''} placeholder="${esc(f.ph || '')}">${hint}</label>`;
   }
@@ -814,6 +876,7 @@ function readForm(form, fields) {
   for (const f of fields) {
     if (!f.k) continue;
     if (f.t === 'checkbox') o[f.k] = !!form.querySelector(`[name="${f.k}"]`)?.checked;
+    else if (f.t === 'file') o[f.k] = form.elements[f.k]?.files?.[0] || null;
     else if (f.t === 'checks') o[f.k] = $$(`[name="${f.k}"]:checked`, form).map(e => e.value);
     else { const v = (form.elements[f.k]?.value ?? '').trim(); o[f.k] = f.t === 'money' ? (v === '' ? '' : num(v)) : v; }
   }
@@ -937,7 +1000,7 @@ actions['new-patient'] = () => openForm({
   title: 'Novo paciente', fields: patientFields(),
   values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true },
   onSave: async v => {
-    const p = { id: uid(), ...v, responsaveis: [], series: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
+    const p = { id: uid(), ...v, responsaveis: [], series: [], docs: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
     db.patients.push(p);
     curRoute = `p/${p.id}/dados`;
     await commit(isMinor(p) ? 'Paciente cadastrado. Agora adicione os responsáveis.' : 'Paciente cadastrado.');
@@ -969,11 +1032,99 @@ actions['edit-patient'] = ({ id }) => {
 actions['del-patient'] = async ({ id }) => {
   const p = P(id);
   if (!(await ask({ title: `Excluir ${p.nome}?`, text: 'Todos os registros serão apagados: atendimentos, pagamentos, notas, contatos e prontuário. Não dá para desfazer.', ok: 'Excluir paciente', danger: true, typeWord: 'EXCLUIR' }))) return;
+  for (const d of p.docs || []) await queueFile(d.id, null);
   db.patients = db.patients.filter(x => x.id !== id);
   for (const k of ['sessions', 'payments', 'invoices', 'contacts', 'records']) db[k] = db[k].filter(x => x.pacienteId !== id);
   curRoute = 'pacientes';
   await commit('Paciente excluído.');
 };
+
+/* documentos anexados */
+const DOC_TIPOS = ['Contrato', 'Termo de consentimento', 'Autorização dos responsáveis', 'Laudo / relatório', 'Encaminhamento', 'Documento pessoal', 'Outro'];
+const MAX_FILE = 10 * 1024 * 1024;
+const fmtSize = n => n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1).replace('.', ',')} MB`;
+const hasContract = p => (p.docs || []).some(d => d.tipo === 'Contrato');
+async function shrinkImage(file) {  // fotos grandes: no máximo 2000 px no lado maior, JPEG
+  if (!file.type.startsWith('image/') || file.size < 400 * 1024) return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const sc = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas'); c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
+    return blob && blob.size < file.size ? new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' }) : file;
+  } catch { return file; }
+}
+const docFields = withFile => [
+  withFile && { k: 'arquivo', l: 'Arquivo (PDF ou foto)', t: 'file', req: true, accept: 'application/pdf,image/*', w: 'full', hint: 'No iPad dá para escolher um arquivo, uma foto ou tirar uma foto na hora. Fotos grandes são reduzidas automaticamente. Limite: 10 MB.' },
+  { k: 'tipo', l: 'Tipo', t: 'select', opts: DOC_TIPOS }, { k: 'data', l: 'Data de assinatura / emissão', t: 'date' },
+  { k: 'obs', l: 'Observação', w: 'full' },
+].filter(Boolean);
+actions['new-doc'] = ({ pid }) => {
+  const p = P(pid); p.docs ||= [];
+  openForm({ title: `Anexar documento — ${p.nome}`, saveLabel: 'Anexar', fields: docFields(true),
+    values: { tipo: hasContract(p) ? 'Outro' : 'Contrato', data: today() },
+    onSave: async v => {
+      let f = v.arquivo;
+      if (!f) { notice('Escolha um arquivo.'); return false; }
+      const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+      if (!isPdf && !f.type.startsWith('image/')) { notice('Formato não aceito', 'Anexe um PDF ou uma foto.'); return false; }
+      toast('Preparando o arquivo…');
+      f = await shrinkImage(f);
+      if (f.size > MAX_FILE) { notice('Arquivo grande demais', `O limite é 10 MB e este tem ${fmtSize(f.size)}. Se for um PDF escaneado, tente salvar em qualidade menor.`); return false; }
+      const raw = crypto.getRandomValues(new Uint8Array(32)), iv = crypto.getRandomValues(new Uint8Array(12));
+      const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
+      const ct = b64e(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, await f.arrayBuffer()));
+      const d = { id: 'd' + uid().replace(/-/g, '').slice(0, 12), tipo: v.tipo, data: v.data, obs: v.obs, nome: f.name, mime: isPdf ? 'application/pdf' : (f.type || 'image/jpeg'),
+        tamanho: f.size, k: b64e(raw), iv: b64e(iv), criadoEm: new Date().toISOString() };
+      await queueFile(d.id, ct);  // o arquivo primeiro, depois a ficha que o cita
+      p.docs.push(d);
+      await commit(`${d.tipo} anexado.`);
+    } });
+};
+const DOC = (pid, id) => P(pid).docs.find(d => d.id === id);
+actions['edit-doc'] = ({ pid, id }) => { const d = DOC(pid, id); openForm({ title: 'Editar documento', fields: docFields(false), values: d, onSave: async v => { Object.assign(d, v); await commit('Documento atualizado.'); } }); };
+actions['del-doc'] = async ({ pid, id }) => {
+  const p = P(pid), d = DOC(pid, id);
+  if (!(await ask({ title: `Excluir “${d.nome}”?`, text: `${d.tipo}${d.data ? ' de ' + fmtD(d.data) : ''}. O arquivo é apagado deste aparelho e da sua conta.`, ok: 'Excluir', danger: true }))) return;
+  p.docs = p.docs.filter(x => x.id !== id);
+  await queueFile(id, null);
+  await commit('Documento excluído.');
+};
+actions['open-doc'] = async ({ pid, id }) => {
+  const d = DOC(pid, id);
+  toast('Abrindo…');
+  let ct = null; try { ct = await getFileCt(d.id); } catch {}
+  if (!ct) { notice('Arquivo indisponível', cloud ? 'O arquivo ainda não chegou à sua conta. Se ele foi anexado em outro aparelho, abra o app lá para terminar o envio.' : 'O arquivo não está neste aparelho.'); return; }
+  let blob;
+  try {
+    const k = await crypto.subtle.importKey('raw', b64d(d.k), 'AES-GCM', false, ['decrypt']);
+    blob = new Blob([await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(d.iv) }, k, b64d(ct))], { type: d.mime });
+  } catch { notice('Não foi possível abrir o arquivo.'); return; }
+  if (d.mime.startsWith('image/')) return viewImage(d, blob);
+  if (dlCap) { if (await download(/\.pdf$/i.test(d.nome) ? d.nome : d.nome + '.pdf', blob, d.mime)) toast('Arquivo baixado. Abra-o para ver.'); }
+  else window.open(URL.createObjectURL(blob), '_blank');
+};
+function viewImage(d, blob) {
+  const url = URL.createObjectURL(blob), dl = $('#dlg2');
+  dl.innerHTML = `<div class="dlg"><h2>${esc(d.tipo)}${d.data ? ' · ' + fmtD(d.data) : ''}</h2><p class="muted">${esc(d.nome)} · ${fmtSize(d.tamanho)}</p>
+    <img src="${url}" alt="${esc(d.tipo)}" style="max-width:100%;border:1px solid var(--line);border-radius:8px">
+    <div class="foot"><button class="btn" data-x>Fechar</button><button class="btn primary" data-dl>Baixar</button></div></div>`;
+  const close = () => { dl.close(); URL.revokeObjectURL(url); };
+  $('[data-x]', dl).onclick = close; dl.oncancel = e => { e.preventDefault(); close(); };
+  $('[data-dl]', dl).onclick = () => download(/\.(jpe?g|png|webp|gif)$/i.test(d.nome) ? d.nome : d.nome + '.jpg', blob, d.mime);
+  dl.showModal();
+}
+function docsCard(p) {
+  const docs = (p.docs || []).slice().sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+  return `<div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Documentos</h2><button class="btn sm primary" data-act="new-doc" data-pid="${p.id}">+ Anexar</button></div>
+    ${p.status === 'ativo' && !hasContract(p) ? '<div class="alert">Sem contrato anexado. Toque em “+ Anexar” e escolha o tipo “Contrato”.</div>' : ''}
+    ${docs.length ? `<div class="tw"><table><tbody>${docs.map(d => `<tr>
+      <td><b>${esc(d.tipo)}</b>${d.obs ? `<div class="muted">${esc(d.obs)}</div>` : ''}</td>
+      <td>${fmtD(d.data)}<div class="muted">${d.mime === 'application/pdf' ? 'PDF' : 'Foto'} · ${fmtSize(d.tamanho)}</div></td>
+      <td class="acts"><button class="btn sm" data-act="open-doc" data-pid="${p.id}" data-id="${d.id}">Abrir</button> ${menu([['edit-doc', 'Editar', { pid: p.id, id: d.id }], ['del-doc', 'Excluir', { pid: p.id, id: d.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty">Nenhum documento anexado.</div>'}</div>`;
+}
 
 /* responsáveis */
 const guardianFields = () => [
@@ -1309,7 +1460,15 @@ const SETTINGS_FIELDS = [
   { k: 'linkNF', l: 'Link do emissor de NFS-e (prefeitura ou Emissor Nacional)', t: 'url', w: 'full' },
 ];
 actions['save-settings'] = async (_d, form) => { Object.assign(db.settings, readForm(form, SETTINGS_FIELDS)); await commit('Configurações salvas.'); };
-actions['export-vault'] = async () => { if (await download(`consultorio-backup-${today()}.json`, JSON.stringify(await sealVault(db, key, salt)))) toast('Backup criptografado baixado.'); };
+actions['export-vault'] = async () => {
+  const docs = db.patients.flatMap(p => p.docs || []), files = {}; let faltam = 0;
+  if (docs.length) toast('Preparando backup com os anexos…');
+  for (const d of docs) { let ct = null; try { ct = await getFileCt(d.id); } catch {} if (ct) files[d.id] = ct; else faltam++; }
+  if (await download(`consultorio-backup-${today()}.json`, JSON.stringify({ ...(await sealVault(db, key, salt)), files }))) {
+    if (faltam) notice('Backup baixado sem alguns anexos', `${faltam} anexo(s) não estavam disponíveis agora (sem conexão ou ainda sendo enviados por outro aparelho).`);
+    else toast('Backup criptografado baixado.');
+  }
+};
 actions['export-json'] = async () => {
   if (!(await ask({ title: 'Exportar sem criptografia?', text: 'O arquivo terá os dados clínicos abertos, legíveis por qualquer pessoa que o tiver. Guarde-o apenas em local seguro.', ok: 'Exportar' }))) return;
   download(`consultorio-dados-abertos-${today()}.json`, JSON.stringify(db, null, 2));
@@ -1326,7 +1485,7 @@ async function parseBackup(text) {
   if (obj.ct && obj.salt) {
     const pw = await ask({ title: 'Backup criptografado', text: 'Digite a senha que estava em uso quando este backup foi criado.', input: { label: 'Senha do backup', type: 'password' }, ok: 'Abrir' });
     if (!pw) return null;
-    try { return (await openVault(obj, pw)).data; } catch { notice('Senha incorreta para este backup.'); return null; }
+    try { const data = (await openVault(obj, pw)).data; data.__files = obj.files || null; return data; } catch { notice('Senha incorreta para este backup.'); return null; }
   }
   if (!Array.isArray(obj.patients)) { notice('Este arquivo não é um backup deste gerenciador.'); return null; }
   return obj;
@@ -1334,6 +1493,7 @@ async function parseBackup(text) {
 actions['setup-import'] = async () => {
   const text = await readFile(); if (!text) return;
   const data = await parseBackup(text); if (!data) return;
+  pendingFiles = data.__files; delete data.__files;
   pendingImport = data;
   $('#lockErr').textContent = '';
   $('#setupForm p').innerHTML = `<b>Backup carregado: ${data.patients.length} paciente(s).</b> Agora crie a senha para este computador.`;
@@ -1342,6 +1502,8 @@ actions.import = async () => {
   const text = await readFile(); if (!text) return;
   const data = await parseBackup(text); if (!data) return;
   if (!(await ask({ title: 'Substituir todos os dados?', text: `Os dados atuais (${db.patients.length} pacientes) serão trocados pelos do backup (${data.patients.length} pacientes).`, ok: 'Substituir', danger: true }))) return;
+  const files = data.__files; delete data.__files;
+  for (const [id, ct] of Object.entries(files || {})) await queueFile(id, ct);
   db = migrate(data); await commit('Backup restaurado.');
 };
 actions['change-pw'] = () => openForm({ title: 'Trocar senha', fields: [
@@ -1450,7 +1612,11 @@ function vDashboard() {
   const recMes = sum(db.payments.filter(x => x.data.startsWith(month)), x => x.valor);
   const planRev = active.filter(p => p.plano.revisao && p.plano.revisao <= addDays(t, 7));
   const noGuard = active.filter(p => isMinor(p) && !p.responsaveis.length);
+  const noContract = active.filter(p => !hasContract(p));
   const pend = [
+    noContract.length && (noContract.length <= 3
+      ? noContract.map(p => `<li><a href="#/p/${p.id}/dados">${esc(p.nome)}</a> está sem contrato anexado.</li>`).join('')
+      : `<li><a href="#" data-act="show-nocontract">${noContract.length} pacientes ativos sem contrato anexado</a>.</li>`),
     ...noGuard.map(p => `<li><a href="#/p/${p.id}/dados">${esc(p.nome)}</a> é menor de idade e não tem responsável cadastrado.</li>`),
     ...planRev.map(p => `<li>Revisar o <a href="#/p/${p.id}/plano">plano de tratamento de ${esc(p.nome)}</a> (${fmtD(p.plano.revisao)}).</li>`),
     nfPend.length && `<li><a href="#/financeiro">${nfPend.length} nota(s) fiscal(is) a emitir</a>.</li>`,
@@ -1476,10 +1642,11 @@ function vDashboard() {
     </div>`;
 }
 
+actions['show-nocontract'] = () => { ui.pstatus = 'semcontrato'; go('pacientes'); };
 function vPatients() {
   listRenderer = () => {
     const q = ui.pq.trim().toLowerCase();
-    const list = db.patients.filter(p => (!ui.pstatus || p.status === ui.pstatus || (ui.pstatus === 'menores' && isMinor(p) && p.status === 'ativo'))
+    const list = db.patients.filter(p => (!ui.pstatus || p.status === ui.pstatus || (ui.pstatus === 'menores' && isMinor(p) && p.status === 'ativo') || (ui.pstatus === 'semcontrato' && p.status === 'ativo' && !hasContract(p)))
       && (!q || [p.nome, p.nomeSocial, p.cpf, p.telefone, ...p.responsaveis.map(r => r.nome)].some(v => String(v || '').toLowerCase().includes(q))))
       .sort((a, b) => a.nome.localeCompare(b.nome));
     if (!list.length) return `<div class="empty">${db.patients.length ? 'Nenhum paciente encontrado.' : 'Nenhum paciente cadastrado ainda. Clique em “+ Novo paciente”.'}</div>`;
@@ -1490,13 +1657,13 @@ function vPatients() {
         <td>${isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${esc(p.responsaveis[0].telefone || '')}</div>` : esc(p.telefone || '')}</td>
         <td>${ns ? `${fmtDW(ns.data)} <span class="muted">${esc(ns.hora || '')}</span>` : '<span class="muted">—</span>'}</td>
         <td class="num">${b.bal > 0.005 ? `<span style="color:var(--warn)">${money(b.bal)}</span>` : b.bal < -0.005 ? `<span class="muted">crédito ${money(-b.bal)}</span>` : '<span class="muted">em dia</span>'}</td>
-        <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}</td></tr>`;
+        <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}${p.status === 'ativo' && !hasContract(p) ? ' ' + badge('sem contrato', 'warn') : ''}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   };
   return `<div class="head"><h1>Pacientes</h1><div class="actions"><button class="btn primary" data-act="new-patient">+ Novo paciente</button></div></div>
     <div class="card"><div class="toolbar">
       <label class="fld"><span>Buscar</span><input data-ui="pq" data-soft="1" value="${esc(ui.pq)}" placeholder="Nome, CPF, telefone ou responsável"></label>
-      <label class="fld" style="flex:0 1 200px"><span>Situação</span><select data-ui="pstatus">${optsHTML([['', 'Todos'], ...Object.entries(P_STATUS), ['menores', 'Menores de idade (ativos)']], ui.pstatus)}</select></label>
+      <label class="fld" style="flex:0 1 200px"><span>Situação</span><select data-ui="pstatus">${optsHTML([['', 'Todos'], ...Object.entries(P_STATUS), ['menores', 'Menores de idade (ativos)'], ['semcontrato', 'Ativos sem contrato']], ui.pstatus)}</select></label>
     </div><div id="list">${listRenderer()}</div></div>`;
 }
 
@@ -1523,6 +1690,7 @@ function tDados(p) {
     <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
+  ${docsCard(p)}
   <div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Responsáveis ${minor ? '' : '<span class="muted">(opcional para maiores de idade)</span>'}</h2><button class="btn sm primary" data-act="new-guardian" data-pid="${p.id}">+ Responsável</button></div>
     ${minor && !p.responsaveis.length ? '<div class="alert">Paciente menor de idade: cadastre pelo menos um responsável legal.</div>' : ''}
     <div class="cols">${p.responsaveis.map(r => `<div class="gcard"><div class="row" style="justify-content:space-between"><b>${esc(r.nome)}</b>${menu([['edit-guardian', 'Editar', { pid: p.id, id: r.id }], ['del-guardian', 'Remover', { pid: p.id, id: r.id }, 'danger']])}</div>
@@ -1648,7 +1816,8 @@ function vContacts() {
 
 function vConfig() {
   const size = Object.values(partSize).reduce((a, b) => a + b, 0);
-  const sizeTxt = size < 1e6 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1048576).toFixed(1).replace('.', ',')} MB`;
+  const sizeTxt = fmtSize(size);
+  const allDocs = db.patients.flatMap(p => p.docs || []), docsSize = allDocs.reduce((a, d) => a + (d.tamanho || 0), 0);
   const theme = document.documentElement.dataset.theme || '';
   return `<div class="head"><h1>Configurações</h1></div>
     <form class="card" data-submit="save-settings"><div class="grid">${SETTINGS_FIELDS.map(f => fieldHTML(f, db.settings[f.k])).join('')}</div>
@@ -1659,7 +1828,7 @@ function vConfig() {
         <div class="row"><button class="btn primary" data-act="export-vault">Baixar backup criptografado</button><button class="btn" data-act="import">Restaurar backup</button></div>
         <p class="muted">O backup criptografado só abre com a senha atual. Para levar a outro computador, abra este arquivo lá e escolha “Restaurar backup”.</p>
         <button class="btn sm" data-act="export-json">Exportar dados abertos (sem criptografia)</button>
-        <p class="muted" style="margin-bottom:0">Tamanho dos dados (criptografados): ${sizeTxt}.</p></div>
+        <p class="muted" style="margin-bottom:0">Tamanho dos dados (criptografados): ${sizeTxt}${allDocs.length ? ` · anexos: ${allDocs.length} arquivo(s), ${fmtSize(docsSize)}` : ''}.</p></div>
       <div class="card"><h2>Segurança e aparência</h2>
         <p class="muted">Bloqueio automático após ${AUTOLOCK_MIN} minutos sem uso.</p>
         <p class="muted">${cloud ? 'Sincronização ligada: os dados criptografados ficam na sua conta do claude.ai, visíveis só para você, e abrem em qualquer aparelho com a sua senha.' : 'Os dados ficam só neste aparelho. Pela página publicada no claude.ai, eles também sincronizam entre aparelhos.'}</p>
