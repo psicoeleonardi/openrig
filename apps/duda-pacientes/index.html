@@ -411,8 +411,9 @@ function emptyDB() {
   return { v: 1, patients: [], sessions: [], payments: [], invoices: [], contacts: [], records: [], settings: {} };
 }
 function migrate(d) {
-  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records']) if (!Array.isArray(d[k])) d[k] = [];
+  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais' }, d.settings || {});
+  if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
   for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.docs ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
 }
@@ -422,6 +423,31 @@ const paysOf = id => db.payments.filter(p => p.pacienteId === id);
 const invsOf = id => db.invoices.filter(i => i.pacienteId === id);
 const bySess = (a, b) => (a.data + (a.hora || '')).localeCompare(b.data + (b.hora || ''));
 const billable = s => s.status === 'realizado' || ((s.status === 'falta' || s.status === 'cancelado') && s.cobrar);
+/* repasse: valor que a psicóloga paga à plataforma que indicou o paciente, por atendimento cobrado.
+   Cada sessão guarda o valor e a plataforma da época (s.repasse, s.plataformaId); sessões antigas,
+   sem esse registro, usam a regra atual do paciente. */
+const PLAT = id => (db.settings.plataformas || []).find(x => x.id === id);
+const hasVal = v => v !== '' && v != null;
+function repasseRate(p, valor) {
+  const pl = PLAT(p?.plataformaId); if (!pl) return 0;
+  if (hasVal(p.repasse)) return num(p.repasse);
+  return pl.tipo === 'percentual' ? Math.round(num(valor) * num(pl.valor)) / 100 : num(pl.valor);
+}
+const platOf = s => s.plataformaId !== undefined ? s.plataformaId : P(s.pacienteId)?.plataformaId;
+const repasseOf = s => !billable(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
+function stampRepasse(s, p) { if (p?.plataformaId) { s.plataformaId = p.plataformaId; s.repasse = repasseRate(p, s.valor); } else { s.plataformaId = ''; delete s.repasse; } return s; }
+function freezePastRepasse(p) { sessOf(p.id).filter(s => s.plataformaId === undefined && s.status !== 'agendado').forEach(s => stampRepasse(s, p)); }  // antes de mudar a regra, fixa a dos atendimentos já feitos
+function refreshFutureRepasse(p) { sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today()).forEach(s => stampRepasse(s, p)); }
+const platRegra = pl => pl.tipo === 'percentual' ? `${String(num(pl.valor)).replace('.', ',')}% do valor da sessão` : `${money(pl.valor)} por atendimento`;
+function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mês
+  return (db.settings.plataformas || []).map(pl => {
+    const ss = db.sessions.filter(s => platOf(s) === pl.id && billable(s));
+    const devido = sum(ss, repasseOf), pago = sum(db.repassesPagos.filter(r => r.plataformaId === pl.id), r => r.valor);
+    const mes = sum(ss.filter(s => s.data.startsWith(month)), repasseOf);
+    const pacientes = db.patients.filter(p => p.plataformaId === pl.id && p.status === 'ativo').length;
+    return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, pacientes, n: ss.length };
+  });
+}
 function balance(pid) {
   const due = sum(sessOf(pid).filter(billable), s => s.valor), paid = sum(paysOf(pid), p => p.valor);
   return { due, paid, bal: due - paid };
@@ -523,14 +549,14 @@ let cloudTimer = null, cloudBusy = false, cloudSeen = 0, legacyCleanup = false, 
 const PART_KEYS = ['sessions', 'payments', 'invoices', 'contacts', 'records'];
 const partId = pid => 'p-' + String(pid).replace(/[^A-Za-z0-9_-]/g, '_');
 function splitDB(d) {
-  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm } }, by = {};
+  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos } }, by = {};
   for (const p of d.patients) by[p.id] = parts[partId(p.id)] = { patient: p, sessions: [], payments: [], invoices: [], contacts: [], records: [] };
   for (const k of PART_KEYS) for (const r of d[k]) by[r.pacienteId]?.[k].push(r);
   return parts;
 }
 function joinDB(parts) {
   const d = emptyDB(), c = parts.core || {};
-  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm;
+  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || [];
   for (const [id, x] of Object.entries(parts)) {
     if (id === 'core' || !x?.patient) continue;
     d.patients.push(x.patient);
@@ -1049,6 +1075,9 @@ function patientFields() {
     { k: 'diaHorario', l: 'Dia e horário habitual', ph: 'Ex.: terças, 15h' },
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online', 'Híbrido'] },
     { k: 'encaminhadoPor', l: 'Encaminhado(a) por' },
+    { k: 'plataformaId', l: 'Veio por plataforma', t: 'select', opts: [['', 'Não (particular)'], ...(db.settings.plataformas || []).map(pl => [pl.id, `${pl.nome} — ${platRegra(pl)}`])],
+      hint: (db.settings.plataformas || []).length ? 'O repasse à plataforma é calculado em cada atendimento.' : 'Cadastre as plataformas em Financeiro → Plataformas e repasses.' },
+    { k: 'repasse', l: 'Repasse por atendimento para este paciente (R$)', t: 'money', hint: 'Deixe em branco para usar a regra da plataforma.' },
     { k: 'convenio', l: 'Convênio / particular', ph: 'Particular' },
     { k: 'linkChamada', l: 'Link fixo da chamada (Google Meet, Zoom…)', w: 'full', ph: 'meet.google.com/abc-defg-hij' },
     { k: 'cobrarFalta', l: 'Cobrar faltas sem aviso prévio (padrão para este paciente)', t: 'checkbox' },
@@ -1072,6 +1101,7 @@ actions['edit-patient'] = ({ id }) => {
     const antes = { status: p.status, valor: p.valor };
     p.series ||= [];
     v.linkChamada = normUrl(v.linkChamada);
+    freezePastRepasse(p);
     Object.assign(p, v);
     const fut = sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today());
     let msg = 'Dados atualizados.';
@@ -1087,6 +1117,7 @@ actions['edit-patient'] = ({ id }) => {
       up.forEach(s => { s.valor = p.valor; });
       if (up.length) msg += ` Novo valor aplicado a ${up.length} sessão(ões) futura(s).`;
     }
+    refreshFutureRepasse(p);
     await commit(msg);
   } });
 };
@@ -1187,6 +1218,41 @@ function docsCard(p) {
       : '<div class="empty">Nenhum documento anexado.</div>'}</div>`;
 }
 
+/* plataformas e repasses */
+const platFields = () => [
+  { k: 'nome', l: 'Nome da plataforma', req: true, w: 'full' },
+  { k: 'tipo', l: 'Como cobra', t: 'select', opts: [['fixo', 'Valor fixo por atendimento'], ['percentual', 'Percentual do valor da sessão']] },
+  { k: 'valor', l: 'Valor (R$) ou percentual (%)', t: 'money', req: true },
+  { k: 'contato', l: 'Contato / forma de pagar o repasse', w: 'full', ph: 'Ex.: Pix fin@plataforma.com, até o dia 10' },
+  { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
+];
+actions['new-plat'] = () => openForm({ title: 'Nova plataforma', fields: platFields(), values: { tipo: 'fixo' },
+  onSave: async v => { db.settings.plataformas.push({ id: 'pl' + uid().replace(/-/g, '').slice(0, 8), ...v }); await commit('Plataforma cadastrada. Agora vincule os pacientes em Editar dados.'); } });
+actions['edit-plat'] = ({ id }) => { const pl = PLAT(id); openForm({ title: 'Editar plataforma', fields: platFields(), values: pl,
+  intro: '<p class="muted">Mudar a regra vale para as sessões futuras. Atendimentos já feitos mantêm o repasse da época.</p>',
+  onSave: async v => { db.patients.filter(p => p.plataformaId === id).forEach(freezePastRepasse); Object.assign(pl, v); db.patients.filter(p => p.plataformaId === id).forEach(refreshFutureRepasse); await commit('Plataforma atualizada.'); } }); };
+actions['del-plat'] = async ({ id }) => {
+  const pl = PLAT(id), n = db.patients.filter(p => p.plataformaId === id).length, pg = db.repassesPagos.filter(r => r.plataformaId === id).length;
+  if (n || pg) { notice('Esta plataforma está em uso', `${n ? `${n} paciente(s) estão vinculados a ela` : ''}${n && pg ? ' e ' : ''}${pg ? `há ${pg} pagamento(s) de repasse registrados` : ''}. Para manter o histórico certo, ela não pode ser excluída. Você pode tirar a plataforma dos pacientes em Editar dados.`); return; }
+  if (!(await ask({ title: `Excluir ${pl.nome}?`, ok: 'Excluir', danger: true }))) return;
+  db.settings.plataformas = db.settings.plataformas.filter(x => x.id !== id); await commit('Plataforma excluída.');
+};
+const repFields = () => [
+  { k: 'plataformaId', l: 'Plataforma', t: 'select', req: true, opts: db.settings.plataformas.map(pl => [pl.id, pl.nome]) },
+  { k: 'data', l: 'Data do pagamento', t: 'date', req: true }, { k: 'valor', l: 'Valor pago (R$)', t: 'money', req: true },
+  { k: 'forma', l: 'Forma de pagamento', t: 'select', opts: PAY_FORMS }, { k: 'referencia', l: 'Referente a', ph: 'Ex.: atendimentos de setembro' },
+  { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
+];
+actions['pay-plat'] = ({ id }) => {
+  if (!db.settings.plataformas.length) { notice('Cadastre uma plataforma primeiro.'); return; }
+  const r = repasseResumo(today().slice(0, 7)).find(x => x.pl.id === (id || db.settings.plataformas[0].id));
+  openForm({ title: 'Registrar pagamento de repasse', fields: repFields(), values: { plataformaId: r.pl.id, data: today(), forma: 'Pix', valor: r.saldo > 0 ? r.saldo : '', referencia: `Atendimentos até ${fmtD(today())}` },
+    intro: r.saldo > 0 ? `<div class="alert info">A pagar para ${esc(r.pl.nome)}: <b>${money(r.saldo)}</b>.</div>` : '',
+    onSave: async v => { if (!v.valor) { notice('Informe o valor.'); return false; } db.repassesPagos.push({ id: uid(), ...v }); await commit('Pagamento de repasse registrado.'); } });
+};
+actions['edit-rep'] = ({ id }) => { const r = db.repassesPagos.find(x => x.id === id); openForm({ title: 'Editar pagamento de repasse', fields: repFields(), values: r, onSave: async v => { Object.assign(r, v); await commit('Pagamento atualizado.'); } }); };
+actions['del-rep'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este pagamento de repasse?', ok: 'Excluir', danger: true }))) return; db.repassesPagos = db.repassesPagos.filter(x => x.id !== id); await commit('Pagamento excluído.'); };
+
 /* responsáveis */
 const guardianFields = () => [
   { k: 'nome', l: 'Nome completo', req: true, w: 'full' },
@@ -1210,6 +1276,7 @@ function sessionFields(isNew) {
     { k: 'data', l: 'Data', t: 'date', req: true }, { k: 'hora', l: 'Horário', t: 'time' },
     { k: 'duracao', l: 'Duração (min)', t: 'number' }, { k: 'valor', l: 'Valor (R$)', t: 'money' },
     { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(S_STATUS) },
+    { k: 'repasse', l: 'Repasse à plataforma (R$)', t: 'money', hint: 'Preenchido pela regra da plataforma do paciente. Em branco = sem repasse.' },
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online'] },
     { k: 'cobrar', l: 'Cobrar mesmo sendo falta/cancelamento', t: 'checkbox' },
     { k: 'motivo', l: 'Motivo (falta, cancelamento ou reagendamento)', w: 'full' },
@@ -1243,7 +1310,7 @@ function topUpSeries() {
       while (d <= until && (!sr.fim || d < sr.fim)) {
         const id = `${sr.id}-${d}`;
         if (!ids.has(id)) {
-          db.sessions.push({ id, pacienteId: p.id, serieId: sr.id, data: d, hora: sr.hora, duracao: sr.duracao, valor: sr.valor, modalidade: sr.modalidade, status: 'agendado' });
+          db.sessions.push(stampRepasse({ id, pacienteId: p.id, serieId: sr.id, data: d, hora: sr.hora, duracao: sr.duracao, valor: sr.valor, modalidade: sr.modalidade, status: 'agendado' }, p));
           ids.add(id); n++;
         }
         sr.gerado = d; d = addDays(d, step);
@@ -1287,10 +1354,15 @@ function newSession(pid, preset = {}) {
   const p = P(pid);
   openForm({
     title: `Agendar — ${p.nome}`, fields: sessionFields(true),
-    values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
+    values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, repasse: p.plataformaId ? repasseRate(p, p.valor) : '', status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
     onSave: async v => {
       const rep = v.repeticao; delete v.repeticao; v.link = normUrl(v.link);
-      if (!rep) { db.sessions.push({ id: uid(), pacienteId: pid, ...v }); await commit('Sessão salva.'); return; }
+      if (!rep) {
+        const ns = { id: uid(), pacienteId: pid, ...v };
+        if (p.plataformaId) { ns.plataformaId = p.plataformaId; ns.repasse = hasVal(v.repasse) ? v.repasse : 0; } else { ns.plataformaId = ''; delete ns.repasse; }
+        db.sessions.push(ns); await commit('Sessão salva.'); return;
+      }
+      delete v.repasse;  // no horário fixo o repasse vem da regra do paciente
       if (p.status !== 'ativo') { notice('Paciente não está ativo', 'O horário fixo só cria sessões para pacientes com situação “Ativo”. Mude a situação em Editar dados.'); return false; }
       const sr = newSerie(p, { ...v, repeticao: rep });
       const first = S(`${sr.id}-${v.data}`);  // a primeira sessão recebe o que foi preenchido no formulário
@@ -1301,7 +1373,12 @@ function newSession(pid, preset = {}) {
 }
 actions['new-session'] = ({ pid }) => pid ? newSession(pid) : pickPatient('Agendar sessão', newSession);
 const S = id => db.sessions.find(s => s.id === id);
-actions['edit-session'] = ({ id }) => { const s = S(id); openForm({ title: `Editar sessão — ${P(s.pacienteId).nome}`, fields: sessionFields(false), values: s, onSave: async v => { v.link = normUrl(v.link); Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
+actions['edit-session'] = ({ id }) => { const s = S(id), sp = P(s.pacienteId); openForm({ title: `Editar sessão — ${sp.nome}`, fields: sessionFields(false),
+  values: { ...s, repasse: hasVal(s.repasse) ? s.repasse : (platOf(s) ? repasseRate(sp, s.valor) : '') },
+  onSave: async v => { v.link = normUrl(v.link);
+    const pl = s.plataformaId !== undefined ? s.plataformaId : sp.plataformaId;
+    if (pl) { s.plataformaId = pl; if (!hasVal(v.repasse)) v.repasse = 0; } else if (!hasVal(v.repasse)) { delete v.repasse; delete s.repasse; } else s.plataformaId = '';
+    Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
 actions['del-session'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este atendimento?', text: 'Para faltas e cancelamentos, prefira mudar a situação e manter o histórico.', ok: 'Excluir', danger: true }))) return; db.sessions = db.sessions.filter(s => s.id !== id); await commit('Sessão excluída.'); };
 actions['sess-done'] = async ({ id }) => { S(id).status = 'realizado'; await commit('Marcada como realizada.'); };
 actions['sess-miss'] = ({ id }) => {
@@ -1731,6 +1808,8 @@ function sessDetail(s) {
   if (s.status === 'agendado' && sessLink(s)) bits.push(`<a href="${esc(sessLink(s))}" target="_blank" rel="noopener">entrar na chamada</a>`);
   if (s.motivo) bits.push(esc(s.motivo));
   if ((s.status === 'falta' || s.status === 'cancelado')) bits.push(s.cobrar ? 'cobrada' : 'não cobrada');
+  { const pl = PLAT(platOf(s)), r = s.status === 'agendado' ? (hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor)) : repasseOf(s);
+    if (pl && r > 0) bits.push(`repasse ${money(r)} (${esc(pl.nome)})`); }
   return bits.length ? `<div class="muted">${bits.join(' · ')}</div>` : '';
 }
 function sessTable(list, { showPat = true } = {}) {
@@ -1789,6 +1868,7 @@ function vDashboard() {
   const semNF = db.payments.filter(x => !invoiceOf(x.id));
   const nfPend = db.invoices.filter(i => i.status === 'pendente');
   const recMes = sum(db.payments.filter(x => x.data.startsWith(month)), x => x.valor);
+  const reps = repasseResumo(month), repPagar = sum(reps.filter(r => r.saldo > 0), r => r.saldo);
   const planRev = active.filter(p => p.plano.revisao && p.plano.revisao <= addDays(t, 7));
   const noGuard = active.filter(p => isMinor(p) && !p.responsaveis.length);
   const noContract = active.filter(p => !hasContract(p));
@@ -1808,6 +1888,7 @@ function vDashboard() {
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
       <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span></div>
       <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
+      ${reps.length ? `<div class="stat ${repPagar > 0.005 ? 'warn' : ''}"><b>${money(repPagar)}</b><span>repasses a pagar</span></div>` : ''}
       <div class="stat ${contacts.some(c => c.dias < 0) ? 'bad' : contacts.length ? 'warn' : ''}"><b>${contacts.length}</b><span>contatos c/ responsáveis</span></div>
     </div>
     ${stale.length ? `<div class="card"><h2>Atualize a situação destas sessões passadas</h2><p class="muted">Ainda estão como “agendado”. Marque se foram realizadas, faltas, cancelamentos ou reagendamentos.</p>${sessTable(stale)}</div>` : ''}
@@ -1816,6 +1897,8 @@ function vDashboard() {
       <div>
         <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${(() => { const r = c.p.responsaveis.find(r => waLink(r.telefone)); return r ? `<a class="wa" href="${waLink(r.telefone)}" target="_blank" rel="noopener" title="WhatsApp de ${esc(r.nome)}">WhatsApp ${esc(r.nome.split(' ')[0])}</a>` : ''; })()}</td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
         <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<div class="empty">Tudo em dia. 🌿</div>'}</div>
+        ${reps.length ? `<div class="card"><h2>Repasses às plataformas</h2><div class="tw"><table><tbody>${reps.map(r => `<tr><td><b>${esc(r.pl.nome)}</b><div class="muted">${esc(MONTHS[Number(month.slice(5)) - 1])}: ${money(r.mes)} · ${esc(platRegra(r.pl))}</div></td>
+          <td class="num">${r.saldo > 0.005 ? `<b style="color:var(--warn)">${money(r.saldo)}</b>` : '<span class="muted">em dia</span>'}</td><td class="acts">${r.saldo > 0.005 ? `<button class="btn sm" data-act="pay-plat" data-id="${r.pl.id}">Pagar</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
         ${owing.length ? `<div class="card"><h2>Saldos em aberto</h2><div class="tw"><table><tbody>${owing.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.bal)}</td><td class="acts"><button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
       </div>
     </div>`;
@@ -1866,7 +1949,7 @@ function tDados(p) {
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
       <dl class="kv">${kv('Nome', esc(p.nome))}${kv('Nome social', esc(p.nomeSocial))}${kv('Nascimento', p.nasc ? `${fmtD(p.nasc)} (${age(p.nasc)} anos)` : '')}${kv('CPF', esc(p.cpf))}${kv('RG', esc(p.rg))}${kv('Gênero', esc(p.genero))}
       ${kv('Telefone', phoneHTML(p.telefone))}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
-    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
+    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${(() => { const pl = PLAT(p.plataformaId); return pl ? kv('Plataforma', `${esc(pl.nome)} · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}`) : ''; })()}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
   ${onlineCard(p)}
@@ -1914,7 +1997,9 @@ function tAtend(p) {
 }
 function tFin(p) {
   const b = balance(p.id), pays = paysOf(p.id).sort((a, b) => b.data.localeCompare(a.data)), invs = invsOf(p.id).sort((a, b) => (b.dataEmissao || b.competencia || '').localeCompare(a.dataEmissao || a.competencia || ''));
-  return `<div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável (sessões)</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
+  const pl = PLAT(p.plataformaId), rep = sum(sessOf(p.id), repasseOf);
+  return `${pl || rep ? `<div class="alert info">${pl ? `Paciente da plataforma <b>${esc(pl.nome)}</b> · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}. ` : ''}Total de repasses deste paciente: <b>${money(rep)}</b> · líquido para você: <b>${money(b.due - rep)}</b>.</div>` : ''}
+  <div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável (sessões)</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
     <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div>${payTable(pays, { showPat: false })}</div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
@@ -1977,6 +2062,15 @@ function vAgenda() {
 }
 actions['ag-range'] = ({ a, b }) => { ui.agFrom = a; ui.agTo = b; render(); };
 
+function platCard(reps, repPagosMes, month) {
+  return `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Plataformas e repasses</h2><div class="actions">${reps.length ? '<button class="btn sm" data-act="pay-plat">Registrar pagamento</button>' : ''}<button class="btn sm primary" data-act="new-plat">+ Plataforma</button></div></div>
+    ${reps.length ? `<div class="tw"><table><thead><tr><th>Plataforma</th><th>Regra</th><th class="num">Repasse em ${esc(MONTHS[Number(month.slice(5)) - 1])}</th><th class="num">A pagar (total)</th><th></th></tr></thead><tbody>${reps.map(r => `<tr>
+      <td><b>${esc(r.pl.nome)}</b><div class="muted">${r.pacientes} paciente(s) ativo(s)${r.pl.contato ? ' · ' + esc(r.pl.contato) : ''}</div></td><td>${esc(platRegra(r.pl))}</td>
+      <td class="num">${money(r.mes)}</td><td class="num">${r.saldo > 0.005 ? `<b style="color:var(--warn)">${money(r.saldo)}</b>` : r.saldo < -0.005 ? `<span class="muted">crédito ${money(-r.saldo)}</span>` : '<span class="muted">em dia</span>'}</td>
+      <td class="acts">${r.saldo > 0.005 ? `<button class="btn sm" data-act="pay-plat" data-id="${r.pl.id}">Pagar</button> ` : ''}${menu([['edit-plat', 'Editar', { id: r.pl.id }], ['del-plat', 'Excluir', { id: r.pl.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>
+      ${repPagosMes.length ? `<h3 style="margin-top:14px">Repasses pagos em ${fmtMonth(month)}</h3><div class="tw"><table><tbody>${repPagosMes.map(r => `<tr><td>${fmtD(r.data)}</td><td>${esc(PLAT(r.plataformaId)?.nome || '—')}</td><td>${esc(r.forma || '')}${r.referencia ? `<div class="muted">${esc(r.referencia)}</div>` : ''}</td><td class="num">${money(r.valor)}</td><td class="acts">${menu([['edit-rep', 'Editar', { id: r.id }], ['del-rep', 'Excluir', { id: r.id }, 'danger']])}</td></tr>`).join('')}</tbody></table></div>` : ''}`
+      : '<p class="muted" style="margin:0">Cadastre aqui as plataformas que indicam pacientes e quanto cobram por atendimento. Depois, vincule cada paciente em Editar dados → “Veio por plataforma”.</p>'}</div>`;
+}
 function vFinance() {
   const month = ui.finMonth || today().slice(0, 7);
   const pays = db.payments.filter(x => x.data.startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
@@ -1986,12 +2080,16 @@ function vFinance() {
   const nfTotal = sum(db.invoices.filter(i => i.status === 'emitida' && (i.dataEmissao || '').startsWith(month)), i => i.valor);
   const semNF = db.payments.filter(x => !invoiceOf(x.id)).sort((a, b) => b.data.localeCompare(a.data));
   const bals = db.patients.map(p => ({ p, ...balance(p.id) })).filter(x => Math.abs(x.bal) > 0.005).sort((a, b) => b.bal - a.bal);
+  const reps = repasseResumo(month), repMes = sum(reps, r => r.mes);
+  const repPagosMes = db.repassesPagos.filter(r => (r.data || '').startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
   return `<div class="head"><h1>Financeiro</h1><div class="actions">${nfLink()}<button class="btn" data-act="new-invoice">+ Nota fiscal</button><button class="btn primary" data-act="new-payment">+ Pagamento</button></div></div>
     <div class="card"><div class="toolbar"><label class="fld" style="flex:0 1 220px"><span>Mês</span><input type="month" data-ui="finMonth" value="${month}"></label></div>
       <div class="stats" style="margin:0"><div class="stat"><b>${money(sum(pays, x => x.valor))}</b><span>recebido em ${fmtMonth(month)}</span></div>
       <div class="stat"><b>${money(billed)}</b><span>sessões cobráveis no mês</span></div><div class="stat"><b>${money(nfTotal)}</b><span>em notas emitidas no mês</span></div>
-      <div class="stat ${semNF.length ? 'warn' : ''}"><b>${semNF.length}</b><span>pagamentos sem NF (total)</span></div></div>
+      <div class="stat ${semNF.length ? 'warn' : ''}"><b>${semNF.length}</b><span>pagamentos sem NF (total)</span></div>
+      ${reps.length ? `<div class="stat"><b>${money(repMes)}</b><span>repasses das sessões do mês</span></div><div class="stat"><b>${money(billed - repMes)}</b><span>líquido das sessões do mês (após repasses)</span></div>` : ''}</div>
       ${Object.keys(byForm).length ? `<div class="row" style="margin-top:12px">${Object.entries(byForm).map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''}</div>
+    ${platCard(reps, repPagosMes, month)}
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
     <div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>
     ${semNF.length ? `<div class="card"><h2>Pagamentos sem nota fiscal</h2>${payTable(semNF)}</div>` : ''}
