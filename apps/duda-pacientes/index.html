@@ -102,6 +102,9 @@ details.menu .items { position: fixed; z-index: 20; background: var(--surface); 
 details.menu .items button { text-align: left; border: 0; background: none; font: inherit; color: var(--text); padding: 7px 10px; border-radius: 6px; cursor: pointer; }
 details.menu .items button:hover { background: var(--surface-2); }
 details.menu .items button.danger { color: var(--bad); }
+details.menu .items a.mi { display: block; padding: 7px 10px; border-radius: 6px; color: var(--text); }
+details.menu .items a.mi:hover { background: var(--surface-2); text-decoration: none; }
+a.btn { display: inline-block; text-decoration: none; }
 
 /* tabs */
 .tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); margin-bottom: 16px; scrollbar-width: none; }
@@ -409,7 +412,7 @@ function emptyDB() {
 }
 function migrate(d) {
   for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records']) if (!Array.isArray(d[k])) d[k] = [];
-  d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL }, d.settings || {});
+  d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais' }, d.settings || {});
   for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.docs ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
 }
@@ -996,7 +999,7 @@ document.addEventListener('click', async e => {
   if (link) { e.preventDefault(); go(link.getAttribute('href').slice(2)); return; }
   const b = e.target.closest('[data-act]');
   if (!b) {
-    if (!e.target.closest('details.menu')) $$('details.menu[open]').forEach(d => d.open = false);
+    if (!e.target.closest('details.menu') || e.target.closest('a.mi')) $$('details.menu[open]').forEach(d => d.open = false);
     return;
   }
   e.preventDefault();
@@ -1047,6 +1050,7 @@ function patientFields() {
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online', 'Híbrido'] },
     { k: 'encaminhadoPor', l: 'Encaminhado(a) por' },
     { k: 'convenio', l: 'Convênio / particular', ph: 'Particular' },
+    { k: 'linkChamada', l: 'Link fixo da chamada (Google Meet, Zoom…)', w: 'full', ph: 'meet.google.com/abc-defg-hij' },
     { k: 'cobrarFalta', l: 'Cobrar faltas sem aviso prévio (padrão para este paciente)', t: 'checkbox' },
     { k: 'obs', l: 'Observações gerais', t: 'textarea', rows: 3 },
   ];
@@ -1055,6 +1059,7 @@ actions['new-patient'] = () => openForm({
   title: 'Novo paciente', fields: patientFields(),
   values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true },
   onSave: async v => {
+    v.linkChamada = normUrl(v.linkChamada);
     const p = { id: uid(), ...v, responsaveis: [], series: [], docs: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
     db.patients.push(p);
     curRoute = `p/${p.id}/dados`;
@@ -1066,6 +1071,7 @@ actions['edit-patient'] = ({ id }) => {
   openForm({ title: 'Editar paciente', fields: patientFields(), values: p, onSave: async v => {
     const antes = { status: p.status, valor: p.valor };
     p.series ||= [];
+    v.linkChamada = normUrl(v.linkChamada);
     Object.assign(p, v);
     const fut = sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today());
     let msg = 'Dados atualizados.';
@@ -1207,6 +1213,7 @@ function sessionFields(isNew) {
     { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online'] },
     { k: 'cobrar', l: 'Cobrar mesmo sendo falta/cancelamento', t: 'checkbox' },
     { k: 'motivo', l: 'Motivo (falta, cancelamento ou reagendamento)', w: 'full' },
+    { k: 'link', l: 'Link da chamada desta sessão', w: 'full', ph: 'meet.google.com/abc-defg-hij', hint: 'Deixe em branco para usar o link fixo do paciente.' },
     { k: 'obs', l: 'Observações administrativas', t: 'textarea', rows: 2, hint: 'Anotações clínicas vão no prontuário.' },
   ];
   if (isNew) f.unshift({ k: 'repeticao', l: 'Repetição', t: 'select', w: 'full', opts: [['', 'Só esta sessão'], ...Object.entries(SERIE_TXT).map(([k, t]) => [k, t + ', até encerrar'])],
@@ -1261,7 +1268,7 @@ function newSerie(p, v) {
 actions['end-serie'] = ({ pid, sid }) => {
   const p = P(pid), sr = p.series.find(x => x.id === sid);
   openForm({ title: 'Encerrar horário fixo', saveLabel: 'Encerrar',
-    intro: `<p class="muted">${esc(serieResumo(sr))}. As sessões agendadas a partir da data abaixo serão removidas. Sessões já realizadas, faltas e cancelamentos continuam no histórico.</p>`,
+    intro: `<p class="muted">${esc(serieResumo(sr))}. As sessões agendadas a partir da data abaixo serão removidas. Sessões já realizadas, faltas e cancelamentos continuam no histórico.</p><div class="alert info">Se você criou este horário no Google Agenda, encerre lá também: abra o evento, escolha “Excluir” e depois “Este e os eventos seguintes”.</div>`,
     fields: [{ k: 'fim', l: 'Remover as sessões a partir de', t: 'date', req: true }], values: { fim: today() },
     onSave: async v => { const n = endSerie(p, sr, v.fim); await commit(`Horário fixo encerrado. ${n} sessão(ões) futura(s) removida(s).`); } });
 };
@@ -1269,7 +1276,7 @@ actions['change-serie'] = ({ pid, sid }) => {
   const p = P(pid), sr = p.series.find(x => x.id === sid);
   const next = futureOfSerie(sid, today()).sort(bySess)[0];
   openForm({ title: 'Mudar horário fixo', saveLabel: 'Mudar horário',
-    intro: `<p class="muted">Atual: ${esc(serieResumo(sr))}. As sessões agendadas no horário antigo a partir da data abaixo são trocadas pelas do novo horário.</p>`,
+    intro: `<p class="muted">Atual: ${esc(serieResumo(sr))}. As sessões agendadas no horário antigo a partir da data abaixo são trocadas pelas do novo horário.</p><div class="alert info">No Google Agenda, o evento antigo não muda sozinho. Depois de salvar, use “Criar no Google Agenda” no novo horário e exclua o antigo lá (“Este e os eventos seguintes”).</div>`,
     fields: [{ k: 'data', l: 'Primeira sessão no novo horário', t: 'date', req: true, hint: 'O dia da semana desta data passa a ser o dia fixo.' }, { k: 'hora', l: 'Horário', t: 'time' },
       { k: 'intervalo', l: 'Repetição', t: 'select', opts: Object.entries(SERIE_TXT) }, { k: 'duracao', l: 'Duração (min)', t: 'number' },
       { k: 'valor', l: 'Valor (R$)', t: 'money' }, { k: 'modalidade', l: 'Modalidade', t: 'select', empty: true, opts: ['Presencial', 'Online'] }],
@@ -1282,7 +1289,7 @@ function newSession(pid, preset = {}) {
     title: `Agendar — ${p.nome}`, fields: sessionFields(true),
     values: { data: today(), duracao: db.settings.duracaoPadrao, valor: p.valor, status: 'agendado', modalidade: p.modalidade === 'Online' ? 'Online' : (p.modalidade ? 'Presencial' : ''), ...preset },
     onSave: async v => {
-      const rep = v.repeticao; delete v.repeticao;
+      const rep = v.repeticao; delete v.repeticao; v.link = normUrl(v.link);
       if (!rep) { db.sessions.push({ id: uid(), pacienteId: pid, ...v }); await commit('Sessão salva.'); return; }
       if (p.status !== 'ativo') { notice('Paciente não está ativo', 'O horário fixo só cria sessões para pacientes com situação “Ativo”. Mude a situação em Editar dados.'); return false; }
       const sr = newSerie(p, { ...v, repeticao: rep });
@@ -1294,7 +1301,7 @@ function newSession(pid, preset = {}) {
 }
 actions['new-session'] = ({ pid }) => pid ? newSession(pid) : pickPatient('Agendar sessão', newSession);
 const S = id => db.sessions.find(s => s.id === id);
-actions['edit-session'] = ({ id }) => { const s = S(id); openForm({ title: `Editar sessão — ${P(s.pacienteId).nome}`, fields: sessionFields(false), values: s, onSave: async v => { Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
+actions['edit-session'] = ({ id }) => { const s = S(id); openForm({ title: `Editar sessão — ${P(s.pacienteId).nome}`, fields: sessionFields(false), values: s, onSave: async v => { v.link = normUrl(v.link); Object.assign(s, v); await commit('Sessão atualizada.'); } }); };
 actions['del-session'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este atendimento?', text: 'Para faltas e cancelamentos, prefira mudar a situação e manter o histórico.', ok: 'Excluir', danger: true }))) return; db.sessions = db.sessions.filter(s => s.id !== id); await commit('Sessão excluída.'); };
 actions['sess-done'] = async ({ id }) => { S(id).status = 'realizado'; await commit('Marcada como realizada.'); };
 actions['sess-miss'] = ({ id }) => {
@@ -1513,6 +1520,10 @@ const SETTINGS_FIELDS = [
   { k: 'valorPadrao', l: 'Valor padrão da sessão (R$)', t: 'money' }, { k: 'duracaoPadrao', l: 'Duração padrão (min)', t: 'number' },
   { k: 'descricaoNF', l: 'Descrição padrão na nota fiscal', w: 'full' },
   { k: 'linkNF', l: 'Link do emissor de NFS-e (prefeitura ou Emissor Nacional)', t: 'url', w: 'full' },
+  { t: 'section', l: 'Google Agenda' },
+  { k: 'gcalPrefixo', l: 'Início do título do evento', ph: 'Sessão' },
+  { k: 'gcalTitulo', l: 'Como o paciente aparece no título', t: 'select', opts: [['iniciais', 'Só as iniciais (ex.: Sessão — M.S.)'], ['primeiro', 'Primeiro nome'], ['completo', 'Nome completo']],
+    hint: 'O evento fica na sua conta Google, fora da criptografia do app. Por sigilo, prefira as iniciais.' },
 ];
 actions['save-settings'] = async (_d, form) => { Object.assign(db.settings, readForm(form, SETTINGS_FIELDS)); await commit('Configurações salvas.'); };
 actions['export-vault'] = async () => {
@@ -1627,8 +1638,68 @@ const badge = (txt, cls = '') => `<span class="b ${cls}">${esc(txt)}</span>`;
 const sBadge = s => badge(S_STATUS[s.status], S_BADGE[s.status]);
 function menu(items) {
   return `<details class="menu"><summary class="btn sm">⋯</summary><div class="items">${items.filter(Boolean).map(([act, label, data = {}, cls = '']) =>
-    `<button class="${cls}" data-act="${act}" ${Object.entries(data).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ')}>${esc(label)}</button>`).join('')}</div></details>`;
+    act === 'link' ? `<a class="mi" href="${esc(data)}" target="_blank" rel="noopener">${esc(label)}</a>`
+      : `<button class="${cls}" data-act="${act}" ${Object.entries(data).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ')}>${esc(label)}</button>`).join('')}</div></details>`;
 }
+
+/* Google Agenda (link pré-preenchido, sem integração) e envio do link da chamada pelo WhatsApp */
+const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Sao_Paulo'; } catch { return 'America/Sao_Paulo'; } })();
+const normUrl = u => { u = String(u || '').trim(); if (!u) return ''; return /^https?:\/\//i.test(u) ? u : 'https://' + u.replace(/^\/+/, ''); };
+const sessLink = s => s.link || P(s.pacienteId)?.linkChamada || '';
+function initials(nome) {
+  return String(nome || '').trim().split(/\s+/).filter(w => w && !/^(de|da|do|das|dos|e)$/i.test(w)).map(w => w[0].toUpperCase() + '.').join('');
+}
+function evTitle(p) {
+  const st = db.settings, nome = (p.nomeSocial || p.nome || '').trim();
+  const who = st.gcalTitulo === 'completo' ? p.nome : st.gcalTitulo === 'primeiro' ? nome.split(/\s+/)[0] : initials(p.nome);
+  return `${st.gcalPrefixo || 'Sessão'} — ${who}`;
+}
+function inviteEmails(p) {
+  const all = [p.email, ...(isMinor(p) ? p.responsaveis.map(r => r.email) : [])].map(x => String(x || '').trim()).filter(x => /\S+@\S+\.\S+/.test(x));
+  return [...new Set(all)];
+}
+function gcalUrl(p, { data, hora, duracao, intervalo, link }) {
+  if (!data || !hora) return '';
+  const [H, M] = hora.split(':').map(Number);
+  const end = new Date(parseISO(data)); end.setHours(H, M + (Number(duracao) || Number(db.settings.duracaoPadrao) || 50));
+  const stamp = (d, h, m) => d.replace(/-/g, '') + 'T' + pad(h) + pad(m) + '00';
+  const st = db.settings;
+  const details = [
+    'Sessão online.',
+    link ? `Link da chamada: ${link}` : 'Para criar o link, use “Adicionar videoconferência do Google Meet” antes de salvar.',
+    st.nome ? `Para remarcar, fale com ${st.nome}${st.telefone ? ' — ' + st.telefone : ''}.` : '',
+  ].filter(Boolean).join('\n');
+  const q = new URLSearchParams({ action: 'TEMPLATE', text: evTitle(p), dates: `${stamp(data, H, M)}/${stamp(toISO(end), end.getHours(), end.getMinutes())}`, ctz: TZ, details });
+  const emails = inviteEmails(p); if (emails.length) q.set('add', emails.join(','));
+  if (link) q.set('location', link);
+  if (intervalo) q.set('recur', `RRULE:FREQ=WEEKLY;INTERVAL=${intervalo}`);
+  return 'https://calendar.google.com/calendar/render?' + q.toString();
+}
+function waTarget(p) {  // menor: responsável (financeiro primeiro); adulto: o próprio paciente
+  if (isMinor(p)) { const r = [financeiro(p), ...p.responsaveis].find(r => r && waLink(r.telefone)); if (r) return { url: waLink(r.telefone), nome: r.nome.split(' ')[0], resp: true }; }
+  if (waLink(p.telefone)) return { url: waLink(p.telefone), nome: (p.nomeSocial || p.nome).split(' ')[0], resp: false };
+  return null;
+}
+function waMsg(p, texto) {
+  const t = waTarget(p); if (!t) return '';
+  const quem = t.resp ? ` de ${(p.nomeSocial || p.nome).split(' ')[0]}` : '';
+  return `${t.url}?text=${encodeURIComponent(texto.replace('{nome}', t.nome).replace('{quem}', quem))}`;
+}
+const horaTxt = h => h ? ' às ' + h.replace(':00', 'h').replace(':', 'h') : '';
+const msgSessao = s => `Olá, {nome}! Segue o link da sessão{quem}, ${WD_FULL[parseISO(s.data).getDay()]} (${fmtD(s.data).slice(0, 5)})${horaTxt(s.hora)}: ${sessLink(s)}`;
+const msgFixo = (p, sr) => `Olá, {nome}! Este é o link das sessões{quem} (${serieResumo(sr).toLowerCase()}): ${p.linkChamada}\nÉ o mesmo link todas as vezes.`;
+const msgLink = p => `Olá, {nome}! Este é o link da chamada das sessões{quem}: ${p.linkChamada}`;
+actions['copy-link'] = async ({ url }) => {
+  try { await navigator.clipboard.writeText(url); toast('Link copiado.'); } catch { notice('Copie o link abaixo', url); }
+};
+actions['set-plink'] = ({ pid }) => {
+  const p = P(pid);
+  openForm({ title: `Link da chamada — ${p.nome}`, saveLabel: 'Salvar link',
+    intro: '<p class="muted">Cole o link da videochamada, por exemplo o do Google Meet criado no evento do Google Agenda. Ele vale para todas as sessões deste paciente.</p>',
+    fields: [{ k: 'linkChamada', l: 'Link da chamada', w: 'full', ph: 'meet.google.com/abc-defg-hij' }], values: p,
+    onSave: async v => { p.linkChamada = normUrl(v.linkChamada); await commit(p.linkChamada ? 'Link salvo.' : 'Link removido.'); } });
+};
+function nextOfSerie(sr) { return futureOfSerie(sr.id, today()).sort(bySess)[0]?.data || (sr.inicio >= today() ? sr.inicio : ''); }
 function sessActs(s) {
   const quick = s.status === 'agendado' ? `<button class="btn sm" data-act="sess-done" data-id="${s.id}" title="Marcar como realizada">✓ Realizada</button> ` : '';
   return quick + menu([
@@ -1636,15 +1707,28 @@ function sessActs(s) {
     s.status === 'agendado' && ['sess-cancel', 'Cancelar', { id: s.id }],
     s.status === 'agendado' && ['sess-resched', 'Reagendar', { id: s.id }],
     (s.status === 'realizado' || s.status === 'falta') && ['new-record', 'Escrever no prontuário', { pid: s.pacienteId, sess: s.id }],
+    ...sessOnlineItems(s),
     ['edit-session', 'Editar', { id: s.id }],
     ['del-session', 'Excluir', { id: s.id }, 'danger'],
   ]);
+}
+function sessOnlineItems(s) {
+  if (s.status !== 'agendado') return [];
+  const p = P(s.pacienteId), link = sessLink(s), out = [];
+  if (!s.serieId && s.hora) out.push(['link', 'Criar no Google Agenda', gcalUrl(p, { ...s, link })]);
+  if (link) {
+    out.push(['link', 'Entrar na chamada', link]);
+    const wa = waMsg(p, msgSessao(s)); if (wa) out.push(['link', 'Enviar link no WhatsApp', wa]);
+    out.push(['copy-link', 'Copiar link da chamada', { url: link }]);
+  }
+  return out;
 }
 function sessDetail(s) {
   const bits = [];
   if (s.status === 'reagendado' && s.reagendadoPara) bits.push(`→ ${fmtD(s.reagendadoPara.data)} ${esc(s.reagendadoPara.hora || '')}`);
   if (s.reagendadoDe) { const o = S(s.reagendadoDe); bits.push(`reagendada${o ? ' de ' + fmtD(o.data) : ''}`); }
   if (s.serieId) bits.push('↻ horário fixo');
+  if (s.status === 'agendado' && sessLink(s)) bits.push(`<a href="${esc(sessLink(s))}" target="_blank" rel="noopener">entrar na chamada</a>`);
   if (s.motivo) bits.push(esc(s.motivo));
   if ((s.status === 'falta' || s.status === 'cancelado')) bits.push(s.cobrar ? 'cobrada' : 'não cobrada');
   return bits.length ? `<div class="muted">${bits.join(' · ')}</div>` : '';
@@ -1785,6 +1869,7 @@ function tDados(p) {
     <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
+  ${onlineCard(p)}
   ${docsCard(p)}
   <div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Responsáveis ${minor ? '' : '<span class="muted">(opcional para maiores de idade)</span>'}</h2><button class="btn sm primary" data-act="new-guardian" data-pid="${p.id}">+ Responsável</button></div>
     ${minor && !p.responsaveis.length ? '<div class="alert">Paciente menor de idade: cadastre pelo menos um responsável legal.</div>' : ''}
@@ -1793,12 +1878,26 @@ function tDados(p) {
       <dl class="kv">${kv('CPF', esc(r.cpf))}${kv('RG', esc(r.rg))}${kv('Telefone', phoneHTML(r.telefone))}${kv('E-mail', esc(r.email))}${kv('Profissão', esc(r.profissao))}${kv('Endereço', esc(r.endereco))}</dl>
       ${r.obs ? `<div class="muted pre">${esc(r.obs)}</div>` : ''}</div>`).join('') || (minor ? '' : '<div class="empty">Nenhum responsável cadastrado.</div>')}</div></div>`;
 }
+function onlineCard(p) {
+  const emails = inviteEmails(p), link = p.linkChamada, wa = link ? waMsg(p, msgLink(p)) : '';
+  const t = waTarget(p);
+  return `<div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Sessão online</h2><button class="btn sm" data-act="set-plink" data-pid="${p.id}">${link ? 'Trocar link' : 'Colar link da chamada'}</button></div>
+    <dl class="kv"><dt>Link da chamada</dt><dd>${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(link.replace(/^https?:\/\//, ''))}</a>` : '<span class="muted">nenhum ainda</span>'}</dd>
+      <dt>Convite do Google vai para</dt><dd>${emails.length ? emails.map(esc).join('<br>') : '<span style="color:var(--warn)">nenhum e-mail cadastrado</span>'}</dd>
+      <dt>WhatsApp do link</dt><dd>${t ? esc(t.nome) + (t.resp ? ' (responsável)' : '') : '<span class="muted">nenhum telefone com DDD</span>'}</dd></dl>
+    ${!emails.length ? `<p class="muted" style="margin:8px 0 0">Sem e-mail, o Google não envia o convite. Cadastre o e-mail ${isMinor(p) ? 'do responsável' : 'do paciente'} em Editar.</p>` : ''}
+    ${link ? `<div class="row" style="margin-top:10px">${wa ? `<a class="btn sm primary" href="${esc(wa)}" target="_blank" rel="noopener">Enviar link no WhatsApp</a>` : ''}<button class="btn sm" data-act="copy-link" data-url="${esc(link)}">Copiar link</button><a class="btn sm" href="${esc(link)}" target="_blank" rel="noopener">Entrar na chamada</a></div>`
+      : `<p class="muted" style="margin:8px 0 0">Como criar: na aba Atendimentos, use “Criar no Google Agenda” no horário fixo (ou no menu ⋯ de uma sessão). No Google, toque em “Adicionar videoconferência do Google Meet”, salve, copie o link do Meet e cole aqui.</p>`}</div>`;
+}
 function seriesCard(p) {
   const act = p.series.filter(sr => sr.ativa);
   return `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Horário fixo</h2></div>
     ${act.length ? act.map(sr => `<div class="row" style="justify-content:space-between;padding:6px 0;border-top:1px solid var(--line)">
       <div><b>${esc(serieResumo(sr))}</b><div class="muted">desde ${fmtD(sr.inicio)}${sr.valor !== '' && sr.valor != null ? ' · ' + money(sr.valor) : ''}${sr.modalidade ? ' · ' + esc(sr.modalidade) : ''}${p.status !== 'ativo' ? ' · suspenso enquanto o paciente não estiver ativo' : ''}</div></div>
-      <div class="row"><button class="btn sm" data-act="change-serie" data-pid="${p.id}" data-sid="${sr.id}">Mudar horário</button><button class="btn sm danger" data-act="end-serie" data-pid="${p.id}" data-sid="${sr.id}">Encerrar</button></div></div>`).join('')
+      <div class="row">${(() => { const d = nextOfSerie(sr), g = d && sr.hora ? gcalUrl(p, { data: d, hora: sr.hora, duracao: sr.duracao, intervalo: sr.intervalo, link: p.linkChamada }) : '';
+        const wa = p.linkChamada ? waMsg(p, msgFixo(p, sr)) : '';
+        return (g ? `<a class="btn sm" href="${esc(g)}" target="_blank" rel="noopener">Criar no Google Agenda</a>` : '') + (wa ? `<a class="btn sm" href="${esc(wa)}" target="_blank" rel="noopener">Enviar link no WhatsApp</a>` : ''); })()}
+        <button class="btn sm" data-act="change-serie" data-pid="${p.id}" data-sid="${sr.id}">Mudar horário</button><button class="btn sm danger" data-act="end-serie" data-pid="${p.id}" data-sid="${sr.id}">Encerrar</button></div></div>`).join('')
       : `<p class="muted" style="margin:0">Sem horário fixo. Em “+ Agendar”, escolha a repetição “Toda semana, até encerrar” para criar um.</p>`}</div>`;
 }
 function tAtend(p) {
