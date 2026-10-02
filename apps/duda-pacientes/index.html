@@ -1699,7 +1699,7 @@ const SETTINGS_FIELDS = [
 ];
 actions['save-settings'] = async (_d, form) => { Object.assign(db.settings, readForm(form, SETTINGS_FIELDS)); await commit('Configurações salvas.'); };
 actions['export-vault'] = async () => {
-  const docs = [...db.patients.flatMap(p => p.docs || []), ...(db.settings.aparencia?.foto ? [db.settings.aparencia.foto] : [])], files = {}; let faltam = 0;
+  const docs = [...db.patients.flatMap(p => p.docs || []), ...Object.values(db.settings.aparencias || {}).map(a => a.foto).filter(Boolean)], files = {}; let faltam = 0;
   if (docs.length) toast('Preparando backup com os anexos…');
   for (const d of docs) { let ct = null; try { ct = await getFileCt(d.id); } catch {} if (ct) files[d.id] = ct; else faltam++; }
   if (await download(`consultorio-backup-${today()}.json`, JSON.stringify({ ...(await sealVault(db, key, salt)), files }))) {
@@ -1762,12 +1762,25 @@ actions.wipe = async () => {
   if (cloud) { try { await cloudWipe(); } catch {} }
   curRoute = 'inicio'; showLock();
 };
-/* aparência (tema, plano de fundo e foto): fica nas configurações, criptografada e sincronizada
-   na conta. O navegador do iPad pode apagar o armazenamento local de páginas abertas dentro do
-   claude.ai; por isso a cópia local abaixo serve só para pintar a tela de bloqueio mais rápido. */
+/* aparência (tema, plano de fundo e foto): uma escolha por aparelho, guardada nas configurações
+   (criptografadas, na conta). O navegador do iPad pode apagar o armazenamento local de páginas abertas
+   dentro do claude.ai, então o aparelho é reconhecido pelas suas características (tipo, tela, navegador),
+   não por algo salvo nele. A cópia local serve só para pintar a tela de bloqueio mais rápido. */
+const deviceKey = (() => {
+  const ua = navigator.userAgent, fam = /Edg\//.test(ua) ? 'edge' : /CriOS|Chrome\//.test(ua) ? 'chrome' : /FxiOS|Firefox\//.test(ua) ? 'firefox' : /Safari\//.test(ua) ? 'safari' : 'outro';
+  const kind = /iPad|Macintosh/.test(ua) && navigator.maxTouchPoints > 1 ? 'ipad' : /iPhone/.test(ua) ? 'iphone' : /Android/.test(ua) ? 'android' : /Mac/.test(ua) ? 'mac' : /Windows/.test(ua) ? 'windows' : 'pc';
+  const w = Math.min(screen.width, screen.height), h = Math.max(screen.width, screen.height);
+  const raw = [kind, fam, `${w}x${h}`, navigator.maxTouchPoints || 0].join('|');
+  let x = 5381; for (const c of raw) x = ((x * 33) ^ c.charCodeAt(0)) >>> 0;
+  return 'd' + x.toString(36);
+})();
 const BG_OPTS = [['', 'Sem fundo'], ['rosa', 'Rosa suave'], ['aquarela', 'Aquarela'], ['flores', 'Florzinhas'], ['folhas', 'Folhas'], ['bolinhas', 'Bolinhas']];
 let bgPhoto = null, bgPhotoId = null;  // URL (blob) da foto já decifrada e o id do anexo de onde veio
-const ap = () => (db.settings.aparencia ||= { bg: '', theme: '', foto: null });
+function ap() {  // aparência deste aparelho
+  const st = db.settings; st.aparencias ||= {};
+  if (st.aparencia) { if (!st.aparencias[deviceKey]) st.aparencias[deviceKey] = st.aparencia; delete st.aparencia; }  // versão de 02/10: escolha única → deste aparelho
+  return (st.aparencias[deviceKey] ||= { bg: '', theme: '', foto: null });
+}
 function cacheAp(k, v) { try { localStorage.setItem(k, v); } catch {} }
 function setTheme(v) { const r = document.documentElement; if (v) r.dataset.theme = v; else delete r.dataset.theme; }
 function setBgAttr(v) { const r = document.documentElement; if (v) r.dataset.bg = v; else delete r.dataset.bg; }
@@ -2274,10 +2287,10 @@ function vConfig() {
         <p class="muted">Bloqueio automático após ${AUTOLOCK_MIN} minutos sem uso.</p>
         <p class="muted">${cloud ? 'Sincronização ligada: os dados criptografados ficam na sua conta do claude.ai, visíveis só para você, e abrem em qualquer aparelho com a sua senha.' : 'Os dados ficam só neste aparelho. Pela página publicada no claude.ai, eles também sincronizam entre aparelhos.'}</p>
         <div class="row"><button class="btn" data-act="change-pw">Trocar senha</button><button class="btn" data-act="lock">Bloquear agora</button></div>
-        <h3 style="margin-top:16px">Plano de fundo</h3><p class="muted" style="margin:0">Fica salvo na sua conta e vale em todos os aparelhos.</p>
+        <h3 style="margin-top:16px">Plano de fundo</h3><p class="muted" style="margin:0">Cada aparelho tem a sua escolha (fica salva na conta).</p>
         <div class="bgs">${BG_OPTS.map(([v, l]) => `<button class="sw ${currentBg() === v ? 'on' : ''}" data-act="set-bg" data-v="${v}" style="background:${v ? `var(--bg-${v})` : 'var(--bg)'}" aria-label="${l}"><span>${l}</span></button>`).join('')}
-          <button class="sw ${currentBg() === 'foto' ? 'on' : ''}" data-act="${db.settings.aparencia?.foto ? 'set-bg' : 'bg-photo'}" data-v="foto" style="background:${db.settings.aparencia?.foto ? 'var(--bg-foto)' : 'var(--surface-2)'}" aria-label="Minha foto"><span>${db.settings.aparencia?.foto ? 'Minha foto' : '+ Minha foto'}</span></button></div>
-        ${db.settings.aparencia?.foto ? '<div class="row"><button class="btn sm" data-act="bg-photo">Trocar foto</button><button class="btn sm" data-act="bg-photo-remove">Remover foto</button></div>' : ''}
+          <button class="sw ${currentBg() === 'foto' ? 'on' : ''}" data-act="${ap().foto ? 'set-bg' : 'bg-photo'}" data-v="foto" style="background:${ap().foto ? 'var(--bg-foto)' : 'var(--surface-2)'}" aria-label="Minha foto"><span>${ap().foto ? 'Minha foto' : '+ Minha foto'}</span></button></div>
+        ${ap().foto ? '<div class="row"><button class="btn sm" data-act="bg-photo">Trocar foto</button><button class="btn sm" data-act="bg-photo-remove">Remover foto</button></div>' : ''}
         <h3 style="margin-top:16px">Tema</h3><div class="row">${[['', 'Automático'], ['light', 'Claro'], ['dark', 'Escuro']].map(([v, l]) => `<button class="btn sm ${theme === v ? 'primary' : ''}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
         <h3 style="margin-top:16px">Zona de perigo</h3><button class="btn danger" data-act="wipe">Apagar todos os dados deste navegador</button></div>
     </div>`;
