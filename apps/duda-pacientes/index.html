@@ -839,7 +839,7 @@ document.addEventListener('visibilitychange', async () => {
     db = joinDB(parts);
     toLocal.index = idx;
     try { await kv.write(toLocal, dels); } catch {}
-    render(); toast('Atualizado com as alterações de outro aparelho.');
+    render(); applyAppearance(); toast('Atualizado com as alterações de outro aparelho.');
   } catch {}
 });
 async function commit(msg) {
@@ -949,6 +949,7 @@ document.addEventListener('submit', async e => {
 
 function start() {
   if (topUpSeries()) persist();
+  migrateAppearance().then(m => { applyAppearance(); if (m) persist(); }).catch(() => {});
   restoreFileQueue().catch(() => {});
   $('#lock').hidden = true; $('#lock').innerHTML = '';
   $('#app').hidden = false;
@@ -1698,7 +1699,7 @@ const SETTINGS_FIELDS = [
 ];
 actions['save-settings'] = async (_d, form) => { Object.assign(db.settings, readForm(form, SETTINGS_FIELDS)); await commit('Configurações salvas.'); };
 actions['export-vault'] = async () => {
-  const docs = db.patients.flatMap(p => p.docs || []), files = {}; let faltam = 0;
+  const docs = [...db.patients.flatMap(p => p.docs || []), ...(db.settings.aparencia?.foto ? [db.settings.aparencia.foto] : [])], files = {}; let faltam = 0;
   if (docs.length) toast('Preparando backup com os anexos…');
   for (const d of docs) { let ct = null; try { ct = await getFileCt(d.id); } catch {} if (ct) files[d.id] = ct; else faltam++; }
   if (await download(`consultorio-backup-${today()}.json`, JSON.stringify({ ...(await sealVault(db, key, salt)), files }))) {
@@ -1761,48 +1762,86 @@ actions.wipe = async () => {
   if (cloud) { try { await cloudWipe(); } catch {} }
   curRoute = 'inicio'; showLock();
 };
-actions.theme = ({ v }) => { if (v) document.documentElement.dataset.theme = v; else delete document.documentElement.dataset.theme; try { localStorage.setItem('duda.theme', v); } catch {} };
-try { const th = localStorage.getItem('duda.theme'); if (th) document.documentElement.dataset.theme = th; } catch {}
-
-/* plano de fundo: preferência deste aparelho; a foto fica no IndexedDB deste aparelho */
+/* aparência (tema, plano de fundo e foto): fica nas configurações, criptografada e sincronizada
+   na conta. O navegador do iPad pode apagar o armazenamento local de páginas abertas dentro do
+   claude.ai; por isso a cópia local abaixo serve só para pintar a tela de bloqueio mais rápido. */
 const BG_OPTS = [['', 'Sem fundo'], ['rosa', 'Rosa suave'], ['aquarela', 'Aquarela'], ['flores', 'Florzinhas'], ['folhas', 'Folhas'], ['bolinhas', 'Bolinhas']];
-let bgPhoto = null;
-async function applyBg(v) {
-  const r = document.documentElement;
-  if (v === 'foto') {
-    if (!bgPhoto) { try { bgPhoto = (await kv.get('bgphoto')) || null; } catch {} }
-    if (bgPhoto) r.style.setProperty('--bg-foto-img', `url("${bgPhoto}")`); else v = '';
-  }
-  if (v) r.dataset.bg = v; else delete r.dataset.bg;
-}
+let bgPhoto = null, bgPhotoId = null;  // URL (blob) da foto já decifrada e o id do anexo de onde veio
+const ap = () => (db.settings.aparencia ||= { bg: '', theme: '', foto: null });
+function cacheAp(k, v) { try { localStorage.setItem(k, v); } catch {} }
+function setTheme(v) { const r = document.documentElement; if (v) r.dataset.theme = v; else delete r.dataset.theme; }
+function setBgAttr(v) { const r = document.documentElement; if (v) r.dataset.bg = v; else delete r.dataset.bg; }
 const currentBg = () => document.documentElement.dataset.bg || '';
-function saveBgPref(v) { try { localStorage.setItem('duda.bg', v); } catch {} }
-actions['set-bg'] = async ({ v }) => { await applyBg(v); saveBgPref(currentBg()); render(); };
-async function photoToDataURL(file, max = 1600) {
+async function loadBgPhoto() {  // decifra a foto do fundo (anexo próprio, guardado como os documentos)
+  const f = ap().foto;
+  if (!f) { bgPhoto = null; bgPhotoId = null; document.documentElement.style.removeProperty('--bg-foto-img'); return false; }
+  if (bgPhotoId === f.id && bgPhoto) return true;
+  try {
+    const ct = await getFileCt(f.id); if (!ct) return false;
+    const k = await crypto.subtle.importKey('raw', b64d(f.k), 'AES-GCM', false, ['decrypt']);
+    const bytes = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(f.iv) }, k, b64d(ct));
+    if (bgPhoto) URL.revokeObjectURL(bgPhoto);
+    bgPhoto = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' })); bgPhotoId = f.id;
+    document.documentElement.style.setProperty('--bg-foto-img', `url("${bgPhoto}")`);
+    return true;
+  } catch { return false; }
+}
+async function applyAppearance() {
+  if (!db) return;
+  const a = ap();
+  setTheme(a.theme || ''); cacheAp('duda.theme', a.theme || '');
+  let bg = a.bg || '';
+  if (bg === 'foto' && !(await loadBgPhoto())) bg = '';
+  else loadBgPhoto();  // deixa a miniatura pronta em Configurações (ou limpa a foto removida em outro aparelho)
+  setBgAttr(bg); cacheAp('duda.bg', bg === 'foto' ? '' : bg);
+}
+async function migrateAppearance() {  // traz a escolha feita na versão anterior (só no aparelho) para a conta
+  const a = ap(); if (a.migrado) return false;
+  a.migrado = 1;
+  try { if (!a.theme) a.theme = localStorage.getItem('duda.theme') || ''; if (!a.bg) a.bg = localStorage.getItem('duda.bg') || ''; } catch {}
+  try {
+    const old = await kv.get('bgphoto');
+    if (old && !a.foto) { await savePhotoBlob(await (await fetch(old)).blob()); }
+    if (old) await kv.write({}, ['bgphoto']);
+  } catch {}
+  if (a.bg === 'foto' && !a.foto) a.bg = '';
+  return true;
+}
+async function savePhotoBlob(blob) {
+  const raw = crypto.getRandomValues(new Uint8Array(32)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
+  const ct = b64e(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, await blob.arrayBuffer()));
+  const id = 'bg' + uid().replace(/-/g, '').slice(0, 12), a = ap(), antiga = a.foto;
+  await queueFile(id, ct);
+  a.foto = { id, k: b64e(raw), iv: b64e(iv) };
+  if (antiga) await queueFile(antiga.id, null);
+}
+actions.theme = async ({ v }) => { ap().theme = v || ''; setTheme(v || ''); cacheAp('duda.theme', v || ''); await commit(); };
+actions['set-bg'] = async ({ v }) => { ap().bg = v || ''; await applyAppearance(); await commit(); };
+async function photoToBlob(file, max = 1600) {
   const bmp = await createImageBitmap(file);
   const sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas'); c.width = Math.round(bmp.width * sc); c.height = Math.round(bmp.height * sc);
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return c.toDataURL('image/jpeg', 0.8);
+  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('jpeg')), 'image/jpeg', 0.8));
 }
 actions['bg-photo'] = () => {
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
   inp.onchange = async () => {
     const f = inp.files[0]; if (!f) return;
-    let url; try { url = await photoToDataURL(f); } catch { notice('Não foi possível usar esta imagem', 'Tente outra foto, em JPEG ou PNG.'); return; }
-    try { await kv.write({ bgphoto: url }); } catch {}
-    bgPhoto = url; await applyBg('foto'); saveBgPref('foto'); render(); toast('Foto aplicada como plano de fundo.');
+    let blob; try { blob = await photoToBlob(f); } catch { notice('Não foi possível usar esta imagem', 'Tente outra foto, em JPEG ou PNG.'); return; }
+    await savePhotoBlob(blob);
+    ap().bg = 'foto'; await applyAppearance(); await commit('Foto aplicada como plano de fundo.');
   };
   inp.click();
 };
 actions['bg-photo-remove'] = async () => {
-  bgPhoto = null; try { await kv.write({}, ['bgphoto']); } catch {}
-  document.documentElement.style.removeProperty('--bg-foto-img');
-  if (currentBg() === 'foto') { await applyBg(''); saveBgPref(''); }
-  render(); toast('Foto removida.');
+  const a = ap(); if (a.foto) await queueFile(a.foto.id, null);
+  a.foto = null; if (a.bg === 'foto') a.bg = '';
+  await applyAppearance(); await commit('Foto removida.');
 };
-kv.get('bgphoto').then(u => { bgPhoto = bgPhoto || u || null; }).catch(() => {});
-try { applyBg(localStorage.getItem('duda.bg') || ''); } catch {}
+// antes de desbloquear, usa a última escolha guardada neste aparelho (se o navegador manteve)
+try { setTheme(localStorage.getItem('duda.theme') || ''); setBgAttr(localStorage.getItem('duda.bg') || ''); } catch {}
 
 /* ---------- componentes de visualização ---------- */
 const badge = (txt, cls = '') => `<span class="b ${cls}">${esc(txt)}</span>`;
@@ -2235,15 +2274,14 @@ function vConfig() {
         <p class="muted">Bloqueio automático após ${AUTOLOCK_MIN} minutos sem uso.</p>
         <p class="muted">${cloud ? 'Sincronização ligada: os dados criptografados ficam na sua conta do claude.ai, visíveis só para você, e abrem em qualquer aparelho com a sua senha.' : 'Os dados ficam só neste aparelho. Pela página publicada no claude.ai, eles também sincronizam entre aparelhos.'}</p>
         <div class="row"><button class="btn" data-act="change-pw">Trocar senha</button><button class="btn" data-act="lock">Bloquear agora</button></div>
-        <h3 style="margin-top:16px">Plano de fundo</h3><p class="muted" style="margin:0">Vale só para este aparelho.</p>
+        <h3 style="margin-top:16px">Plano de fundo</h3><p class="muted" style="margin:0">Fica salvo na sua conta e vale em todos os aparelhos.</p>
         <div class="bgs">${BG_OPTS.map(([v, l]) => `<button class="sw ${currentBg() === v ? 'on' : ''}" data-act="set-bg" data-v="${v}" style="background:${v ? `var(--bg-${v})` : 'var(--bg)'}" aria-label="${l}"><span>${l}</span></button>`).join('')}
-          <button class="sw ${currentBg() === 'foto' ? 'on' : ''}" data-act="${bgPhoto ? 'set-bg' : 'bg-photo'}" data-v="foto" style="background:${bgPhoto ? 'var(--bg-foto)' : 'var(--surface-2)'}" aria-label="Minha foto"><span>${bgPhoto ? 'Minha foto' : '+ Minha foto'}</span></button></div>
-        ${bgPhoto ? '<div class="row"><button class="btn sm" data-act="bg-photo">Trocar foto</button><button class="btn sm" data-act="bg-photo-remove">Remover foto</button></div>' : ''}
+          <button class="sw ${currentBg() === 'foto' ? 'on' : ''}" data-act="${db.settings.aparencia?.foto ? 'set-bg' : 'bg-photo'}" data-v="foto" style="background:${db.settings.aparencia?.foto ? 'var(--bg-foto)' : 'var(--surface-2)'}" aria-label="Minha foto"><span>${db.settings.aparencia?.foto ? 'Minha foto' : '+ Minha foto'}</span></button></div>
+        ${db.settings.aparencia?.foto ? '<div class="row"><button class="btn sm" data-act="bg-photo">Trocar foto</button><button class="btn sm" data-act="bg-photo-remove">Remover foto</button></div>' : ''}
         <h3 style="margin-top:16px">Tema</h3><div class="row">${[['', 'Automático'], ['light', 'Claro'], ['dark', 'Escuro']].map(([v, l]) => `<button class="btn sm ${theme === v ? 'primary' : ''}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
         <h3 style="margin-top:16px">Zona de perigo</h3><button class="btn danger" data-act="wipe">Apagar todos os dados deste navegador</button></div>
     </div>`;
 }
-const _theme = actions.theme; actions.theme = d => { _theme(d); render(); };
 
 /* ---------- roteador ---------- */
 let curRoute = 'inicio';
