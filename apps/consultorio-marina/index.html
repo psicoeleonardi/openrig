@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Consultório da Duda</title>
+<title>Consultório da Marina</title>
 <style>
 :root {
   --bg: #f6f5f2; --surface: #ffffff; --surface-2: #f0eee9; --text: #23211d; --muted: #6d6961;
@@ -255,11 +255,8 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
    O que muda de uma pessoa para outra fica só aqui. Para gerar a versão de outra profissional,
    use gerar-versao.py (troca este bloco e o <title>). */
 const APP = {
-  chave: 'duda',  // prefixo do armazenamento no navegador; cada versão tem o seu
-  plataformasPadrao: [  // plataformas que já vêm cadastradas (uma vez só; se excluídas, não voltam)
-    { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
-    { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
-  ],
+  chave: 'marina',  // prefixo do armazenamento no navegador; cada versão tem o seu
+  plataformasPadrao: [],  // plataformas que já vêm cadastradas (nenhuma nesta versão)
 };
 const STORE = `${APP.chave}.pacientes.vault.v1`;
 const AUTOLOCK_MIN = 15;
