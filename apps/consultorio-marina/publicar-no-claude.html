@@ -414,7 +414,7 @@ function emptyDB() {
 }
 function migrate(d) {
   for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos']) if (!Array.isArray(d[k])) d[k] = [];
-  d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais' }, d.settings || {});
+  d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais', backupDias: 7, ultimoBackup: '', backupAdiado: '' }, d.settings || {});
   if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
   if (!d.settings.platSeed) {  // plataformas padrão desta versão (uma vez só; se excluídas, não voltam)
     d.settings.platSeed = 1;
@@ -1705,8 +1705,20 @@ actions['export-vault'] = async () => {
   if (await download(`consultorio-backup-${today()}.json`, JSON.stringify({ ...(await sealVault(db, key, salt)), files }))) {
     if (faltam) notice('Backup baixado sem alguns anexos', `${faltam} anexo(s) não estavam disponíveis agora (sem conexão ou ainda sendo enviados por outro aparelho).`);
     else toast('Backup criptografado baixado.');
+    db.settings.ultimoBackup = new Date().toISOString(); db.settings.backupAdiado = '';
+    await commit();
   }
 };
+/* lembrete de backup: aparece na tela inicial quando passa o prazo e houve alterações desde o último */
+function backupStatus() {
+  const st = db.settings, last = st.ultimoBackup;
+  const dias = last ? daysUntil(today()) - daysUntil(toISO(new Date(last))) : null;  // dias desde o último backup
+  const mudou = !last || (Date.parse(db.atualizadoEm || 0) - Date.parse(last) > 60000);
+  const devido = db.patients.length > 0 && mudou && (!last || dias >= (Number(st.backupDias) || 7)) && !(st.backupAdiado && today() < st.backupAdiado);
+  return { last, dias, devido };
+}
+actions['backup-later'] = async () => { db.settings.backupAdiado = addDays(today(), 2); await commit('Vou lembrar de novo em 2 dias.'); };
+actions['backup-freq'] = async (_d, el) => { db.settings.backupDias = Number(el.value) || 7; await commit('Frequência do lembrete salva.'); };
 actions['export-json'] = async () => {
   if (!(await ask({ title: 'Exportar sem criptografia?', text: 'O arquivo terá os dados clínicos abertos, legíveis por qualquer pessoa que o tiver. Guarde-o apenas em local seguro.', ok: 'Exportar' }))) return;
   download(`consultorio-dados-abertos-${today()}.json`, JSON.stringify(db, null, 2));
@@ -2028,7 +2040,12 @@ function vDashboard() {
     nfPend.length && `<li><a href="#/financeiro">${nfPend.length} nota(s) fiscal(is) a emitir</a>.</li>`,
     semNF.length && `<li><a href="#/financeiro">${semNF.length} pagamento(s) ainda sem nota fiscal</a>.</li>`,
   ].filter(Boolean);
-  return `<div class="head"><div><h1>Olá${db.settings.nome ? ', ' + esc(db.settings.nome.split(' ')[0]) : ''}!</h1><div class="muted">${fmtDW(t)}</div></div>
+  const bk = backupStatus();
+  return `${bk.devido ? `<div class="alert" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+      <div><b>Hora de fazer um backup.</b> ${bk.last ? `O último foi há ${bk.dias} dia${bk.dias === 1 ? '' : 's'} (${fmtD(toISO(new Date(bk.last)))}).` : 'Você ainda não fez nenhum backup.'}
+        <div style="font-size:.88em;margin-top:2px">Guarde o arquivo fora deste aparelho: no iPad, em Arquivos → iCloud Drive ou Google Drive.</div></div>
+      <div class="row"><button class="btn sm primary" data-act="export-vault">Baixar backup agora</button><button class="btn sm" data-act="backup-later">Lembrar em 2 dias</button></div></div>` : ''}
+  <div class="head"><div><h1>Olá${db.settings.nome ? ', ' + esc(db.settings.nome.split(' ')[0]) : ''}!</h1><div class="muted">${fmtDW(t)}</div></div>
     <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button><button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
@@ -2278,7 +2295,9 @@ function vConfig() {
       <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn primary">Salvar configurações</button></div></form>
     <div class="cols">
       <div class="card"><h2>Backup</h2>
-        <p class="muted">Os dados ficam apenas neste navegador, neste computador. Faça backups com frequência (ex.: toda semana) e guarde em um pendrive ou nuvem.</p>
+        ${(() => { const bk = backupStatus(); return `<p style="margin-top:0">Último backup: <b>${bk.last ? `${fmtD(toISO(new Date(bk.last)))} (há ${bk.dias} dia${bk.dias === 1 ? '' : 's'})` : 'nenhum ainda'}</b></p>`; })()}
+        <p class="muted">${cloud ? 'Os dados já ficam salvos na sua conta, mas um backup guardado fora (iCloud Drive, Google Drive ou pendrive) protege contra exclusão acidental e problemas na conta.' : 'Os dados ficam apenas neste navegador, neste aparelho. Faça backups com frequência e guarde em um pendrive ou nuvem.'}</p>
+        <label class="fld" style="max-width:260px;margin-bottom:10px"><span>Lembrar de fazer backup</span><select data-change="backup-freq">${optsHTML([['7', 'Toda semana'], ['15', 'A cada 15 dias'], ['30', 'Todo mês']], String(db.settings.backupDias || 7))}</select></label>
         <div class="row"><button class="btn primary" data-act="export-vault">Baixar backup criptografado</button><button class="btn" data-act="import">Restaurar backup</button></div>
         <p class="muted">O backup criptografado só abre com a senha atual. Para levar a outro computador, abra este arquivo lá e escolha “Restaurar backup”.</p>
         <button class="btn sm" data-act="export-json">Exportar dados abertos (sem criptografia)</button>
