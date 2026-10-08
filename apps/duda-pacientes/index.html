@@ -500,10 +500,43 @@ function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mê
     return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, pacientes, n: ss.length };
   });
 }
+/* cobrança: por sessão (padrão) ou mensal (valor fixo por mês, qualquer que seja o número de sessões).
+   p.cobrancaHist = [{ desde: 'AAAA-MM', tipo: 'sessao' | 'mensal', valor }]: vale a última entrada até aquele mês,
+   então mudar o tipo ou o valor não altera os meses anteriores. Um mês mensal é cobrado quando tem pelo
+   menos um atendimento cobrável (realizado, ou falta/cancelamento cobrados). */
+function cobrancaEm(p, ym) {
+  const h = (p?.cobrancaHist || []).filter(x => x.desde <= ym).sort((a, b) => a.desde.localeCompare(b.desde)).pop();
+  return h || { tipo: 'sessao' };
+}
+const mensalEm = (p, ym) => cobrancaEm(p, ym).tipo === 'mensal';
+const porSessao = s => !mensalEm(P(s.pacienteId), s.data.slice(0, 7));  // a sessão tem preço próprio?
+function mensalidades(p) {  // [{ ym, valor }] dos meses cobrados como mensais
+  const meses = [...new Set(sessOf(p.id).filter(billable).map(s => s.data.slice(0, 7)))].filter(ym => mensalEm(p, ym)).sort();
+  return meses.map(ym => ({ ym, valor: num(cobrancaEm(p, ym).valor) }));
+}
+function itensCobrados(p) {  // tudo o que foi cobrado do paciente, em ordem: sessões avulsas e mensalidades
+  return [...sessOf(p.id).filter(s => billable(s) && porSessao(s)).map(s => ({ data: s.data, valor: num(s.valor), rot: fmtD(s.data).slice(0, 5), sessao: true })),
+    ...mensalidades(p).map(m => ({ data: m.ym + '-31', valor: m.valor, rot: 'mensalidade de ' + MONTHS[Number(m.ym.slice(5)) - 1], sessao: false }))].sort((a, b) => a.data.localeCompare(b.data));
+}
 function balance(pid) {
-  const due = sum(sessOf(pid).filter(billable), s => s.valor), paid = sum(paysOf(pid), p => p.valor);
+  const p = P(pid), due = sum(itensCobrados(p), x => x.valor), paid = sum(paysOf(pid), x => x.valor);
   return { due, paid, bal: due - paid };
 }
+function cobradoNoMes(ym) {  // sessões avulsas cobráveis do mês + mensalidades do mês
+  return sum(db.sessions.filter(s => s.data.startsWith(ym) && billable(s) && porSessao(s)), s => s.valor)
+    + sum(db.patients.filter(p => mensalEm(p, ym) && sessOf(p.id).some(s => billable(s) && s.data.startsWith(ym))), p => cobrancaEm(p, ym).valor);
+}
+function aplicarCobranca(p, v) {  // grava a mudança de tipo/valor a partir do mês escolhido
+  const tipo = v.cobranca === 'mensal' ? 'mensal' : 'sessao', valor = tipo === 'mensal' ? num(v.mensalidade) : '';
+  const desde = (v.mensalDesde || today().slice(0, 7)).slice(0, 7);
+  delete v.cobranca; delete v.mensalidade; delete v.mensalDesde;
+  const atual = cobrancaEm(p, desde);
+  if (atual.tipo === tipo && (tipo === 'sessao' || num(atual.valor) === valor)) return false;
+  p.cobrancaHist = (p.cobrancaHist || []).filter(x => x.desde < desde);  // a nova regra vale de "desde" em diante
+  if (tipo === 'mensal' || p.cobrancaHist.length) p.cobrancaHist.push({ desde, tipo, valor });
+  return true;
+}
+const cobrancaTxt = (p, ym = today().slice(0, 7)) => { const c = cobrancaEm(p, ym); return c.tipo === 'mensal' ? `${money(c.valor)} por mês` : 'por sessão'; };
 const invoiceOf = payId => db.invoices.find(i => i.status !== 'cancelada' && (i.pagamentos || []).includes(payId));
 const nextSession = pid => sessOf(pid).filter(s => s.status === 'agendado' && s.data >= today()).sort(bySess)[0];
 const financeiro = p => p.responsaveis.find(r => r.financeiro) || p.responsaveis[0];
@@ -1140,6 +1173,9 @@ function patientFields() {
     { t: 'section', l: 'Atendimento' },
     { k: 'inicio', l: 'Início do acompanhamento', t: 'date' },
     { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(P_STATUS) },
+    { k: 'cobranca', l: 'Como cobra', t: 'select', opts: [['sessao', 'Por sessão'], ['mensal', 'Valor fixo por mês']] },
+    { k: 'mensalidade', l: 'Valor por mês (R$)', t: 'money', hint: 'O mesmo valor em todo mês com atendimento, não importa quantas semanas.' },
+    { k: 'mensalDesde', l: 'Cobrança mensal a partir de', t: 'month', hint: 'Os meses anteriores continuam como estavam.' },
     { k: 'valor', l: 'Valor da sessão (R$)', t: 'money' },
     { k: 'frequencia', l: 'Frequência', t: 'select', empty: true, opts: ['Semanal', 'Quinzenal', 'Mensal', 'Duas vezes por semana', 'Outra'] },
     { k: 'diaHorario', l: 'Dia e horário habitual', ph: 'Ex.: terças, 15h' },
@@ -1159,15 +1195,26 @@ function patientFormUI(form) {  // o repasse diferente só aparece se houver pla
   const chk = form.querySelector('[name=repasseDif]'), row = form.repasse.closest('.fld'), chkRow = chk.closest('.check');
   const sync = () => { const pl = !!form.plataformaId.value; chkRow.hidden = !pl; row.hidden = !(pl && chk.checked); };
   form.plataformaId.addEventListener('change', sync); chk.addEventListener('change', sync); sync();
+  // cobrança mensal: mostra o valor do mês e de quando vale; o valor da sessão vira só referência (para o repasse)
+  const vLab = form.valor.closest('.fld').querySelector('span');
+  const syncC = () => { const m = form.cobranca.value === 'mensal';
+    form.mensalidade.closest('.fld').hidden = !m; form.mensalDesde.closest('.fld').hidden = !m;
+    vLab.textContent = m ? 'Valor de referência por sessão (R$), usado só no repasse' : 'Valor da sessão (R$)'; };
+  form.cobranca.addEventListener('change', syncC); syncC();
 }
+const cobrancaValues = p => { const c = cobrancaEm(p, today().slice(0, 7)); return { cobranca: c.tipo, mensalidade: c.tipo === 'mensal' ? c.valor : '', mensalDesde: today().slice(0, 7) }; };
 function cleanRepasse(v) { if (!v.plataformaId || !v.repasseDif) v.repasse = ''; delete v.repasseDif; }
 actions['new-patient'] = () => openForm({
   title: 'Novo paciente', fields: patientFields(), onRender: patientFormUI,
-  values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true },
+  values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true, cobranca: 'sessao', mensalDesde: today().slice(0, 7) },
   onSave: async v => {
+    if (v.cobranca === 'mensal' && !num(v.mensalidade)) { notice('Informe o valor por mês.'); return false; }
     cleanRepasse(v);
+    const cob = { cobranca: v.cobranca, mensalidade: v.mensalidade, mensalDesde: v.mensalDesde || (v.inicio || today()).slice(0, 7) };
+    delete v.cobranca; delete v.mensalidade; delete v.mensalDesde;
     v.linkChamada = normUrl(v.linkChamada);
     const p = { id: uid(), ...v, responsaveis: [], series: [], docs: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
+    aplicarCobranca(p, cob);
     db.patients.push(p);
     curRoute = `p/${p.id}/dados`;
     await commit(isMinor(p) ? 'Paciente cadastrado. Agora adicione os responsáveis.' : 'Paciente cadastrado.');
@@ -1175,8 +1222,10 @@ actions['new-patient'] = () => openForm({
 });
 actions['edit-patient'] = ({ id }) => {
   const p = P(id);
-  openForm({ title: 'Editar paciente', fields: patientFields(), values: { ...p, repasseDif: hasVal(p.repasse) }, onRender: patientFormUI, onSave: async v => {
+  openForm({ title: 'Editar paciente', fields: patientFields(), values: { ...p, repasseDif: hasVal(p.repasse), ...cobrancaValues(p) }, onRender: patientFormUI, onSave: async v => {
+    if (v.cobranca === 'mensal' && !num(v.mensalidade)) { notice('Informe o valor por mês.'); return false; }
     cleanRepasse(v);
+    const mudouCobranca = aplicarCobranca(p, v);
     const antes = { status: p.status, valor: p.valor, plataformaId: p.plataformaId || '' };
     p.series ||= [];
     v.linkChamada = normUrl(v.linkChamada);
@@ -1196,6 +1245,7 @@ actions['edit-patient'] = ({ id }) => {
       up.forEach(s => { s.valor = p.valor; });
       if (up.length) msg += ` Novo valor aplicado a ${up.length} sessão(ões) futura(s).`;
     }
+    if (mudouCobranca) msg += ` Cobrança: ${cobrancaTxt(p)}.`;
     refreshFutureRepasse(p);
     if (p.plataformaId && p.plataformaId !== antes.plataformaId) {  // esqueceu de marcar no começo? oferece aplicar ao que já foi atendido
       const pl = PLAT(p.plataformaId), list = semRepasse(p);
@@ -1642,10 +1692,12 @@ function paymentFields() {
 function suggestReference(pid) {
   const bal = balance(pid);
   if (bal.bal <= 0) return { valor: '', referencia: '' };
-  // sessões cobráveis mais recentes que somam o saldo em aberto
-  const ss = sessOf(pid).filter(billable).sort(bySess).reverse(); let acc = 0; const pick = [];
-  for (const s of ss) { if (acc >= bal.bal - 0.005) break; acc += num(s.valor); pick.unshift(s); }
-  return { valor: Math.round(bal.bal * 100) / 100, referencia: pick.length ? 'Sessões de ' + pick.map(s => fmtD(s.data).slice(0, 5)).join(', ') : '' };
+  // itens cobrados mais recentes (sessões e mensalidades) que somam o saldo em aberto
+  const its = itensCobrados(P(pid)).reverse(); let acc = 0; const pick = [];
+  for (const x of its) { if (acc >= bal.bal - 0.005) break; acc += x.valor; pick.unshift(x); }
+  const ses = pick.filter(x => x.sessao).map(x => x.rot), men = pick.filter(x => !x.sessao).map(x => x.rot.replace('mensalidade de ', ''));
+  const ref = [men.length ? `Mensalidade de ${men.join(', ')}` : '', ses.length ? `Sessões de ${ses.join(', ')}` : ''].filter(Boolean).join(' · ');
+  return { valor: Math.round(bal.bal * 100) / 100, referencia: ref };
 }
 function newPayment(pid) {
   const p = P(pid), pay = payer(p), sug = suggestReference(pid);
@@ -2100,7 +2152,7 @@ function sessTable(list, { showPat = true } = {}) {
     return `<tr><td>${fmtDW(s.data)}<div class="muted">${[s.hora && esc(s.hora), s.duracao && `${esc(s.duracao)} min`, s.modalidade && esc(s.modalidade)].filter(Boolean).join(' · ')}</div></td>
       ${showPat ? `<td><a href="#/p/${p.id}/atendimentos">${esc(p.nome)}</a>${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>` : ''}
       <td>${sBadge(s)}${sessDetail(s)}</td>
-      <td class="num">${billable(s) || s.status === 'agendado' ? money(s.valor) : `<span class="muted">—</span>`}</td>
+      <td class="num">${!porSessao(s) ? '<span class="muted">mensal</span>' : billable(s) || s.status === 'agendado' ? money(s.valor) : `<span class="muted">—</span>`}</td>
       <td class="acts">${sessActs(s)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
@@ -2243,7 +2295,7 @@ function tDados(p) {
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
       <dl class="kv">${kv('Nome', esc(p.nome))}${kv('Nome social', esc(p.nomeSocial))}${kv('Nascimento', p.nasc ? `${fmtD(p.nasc)} (${age(p.nasc)} anos)` : '')}${kv('CPF', esc(p.cpf))}${kv('RG', esc(p.rg))}${kv('Gênero', esc(p.genero))}
       ${kv('Telefone', phoneHTML(p.telefone))}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
-    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${(() => { const pl = PLAT(p.plataformaId); return pl ? kv('Plataforma', `${esc(pl.nome)} · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}`) : ''; })()}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
+    <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${mensalEm(p, today().slice(0, 7)) ? kv('Cobrança', `<b>${cobrancaTxt(p)}</b>${p.valor !== '' && p.valor != null ? ` <span class="muted">(referência por sessão para repasse: ${money(p.valor)})</span>` : ''}`) : kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${(() => { const pl = PLAT(p.plataformaId); return pl ? kv('Plataforma', `${esc(pl.nome)} · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}`) : ''; })()}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
   ${onlineCard(p)}
@@ -2294,7 +2346,9 @@ function tFin(p) {
   const pl = PLAT(p.plataformaId), rep = sum(sessOf(p.id), repasseOf), faltam = semRepasse(p).filter(billable);
   return `${faltam.length ? `<div class="alert">${faltam.length} atendimento(s) anteriores estão sem o repasse de ${esc(pl.nome)} (provavelmente foram registrados antes de marcar a plataforma). <button class="btn sm" data-act="apply-plat-past" data-pid="${p.id}">Aplicar repasse</button></div>` : ''}
   ${pl || rep ? `<div class="alert info">${pl ? `Paciente da plataforma <b>${esc(pl.nome)}</b> · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}. ` : ''}Total de repasses deste paciente: <b>${money(rep)}</b> · líquido para você: <b>${money(b.due - rep)}</b>.</div>` : ''}
-  <div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável (sessões)</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
+  ${(() => { const ms = mensalidades(p); if (!ms.length && !mensalEm(p, today().slice(0, 7))) return '';
+    return `<div class="card"><h2>Mensalidades</h2><p class="muted" style="margin:0 0 6px">Cobrança atual: <b>${cobrancaTxt(p)}</b>. O mês entra quando tem pelo menos um atendimento cobrável.</p>${ms.length ? `<div class="tw"><table><tbody>${ms.slice().reverse().map(m => `<tr><td>${esc(fmtMonth(m.ym))}</td><td class="num">${money(m.valor)}</td><td class="muted">${sessOf(p.id).filter(s => billable(s) && s.data.startsWith(m.ym)).length} atendimento(s)</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">Nenhum mês cobrado ainda.</p>'}</div>`; })()}
+  <div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
     <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div>${payTable(pays, { showPat: false })}</div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
@@ -2375,7 +2429,7 @@ function vFinance() {
   const pays = db.payments.filter(x => x.data.startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
   const byForm = {}; pays.forEach(x => { byForm[x.forma || 'Outro'] = (byForm[x.forma || 'Outro'] || 0) + num(x.valor); });
   const invs = db.invoices.filter(i => (i.dataEmissao || '').startsWith(month) || (!i.dataEmissao && i.competencia === month) || i.status === 'pendente').sort((a, b) => (b.dataEmissao || '').localeCompare(a.dataEmissao || ''));
-  const billed = sum(db.sessions.filter(s => s.data.startsWith(month) && billable(s)), s => s.valor);
+  const billed = cobradoNoMes(month);
   const nfTotal = sum(db.invoices.filter(i => i.status === 'emitida' && (i.dataEmissao || '').startsWith(month)), i => i.valor);
   const semNF = db.payments.filter(x => !invoiceOf(x.id)).sort((a, b) => b.data.localeCompare(a.data));
   const bals = db.patients.map(p => ({ p, ...balance(p.id) })).filter(x => Math.abs(x.bal) > 0.005).sort((a, b) => b.bal - a.bal);
