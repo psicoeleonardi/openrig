@@ -495,38 +495,26 @@ function platRegra(pl) {
   }
   return pl.tipo === 'percentual' ? `${pct(pl.valor)} do valor da sessão` : `${money(pl.valor)} por atendimento`;
 }
-/* quanto de cada sessão foi pago em dinheiro: os pagamentos do paciente quitam o que foi cobrado
-   (sessões e mensalidades) do mais antigo para o mais novo; o repasse da parte paga em dinheiro
-   pode sair desse dinheiro, o resto é pago por Pix. */
-function fracDinheiro() {
-  const out = new Map();
-  for (const p of db.patients) {
-    const its = itensCobrados(p); if (!its.length) continue;
-    const cash = its.map(() => 0); let i = 0, rest = its[0].valor;
-    for (const pg of paysOf(p.id).slice().sort((a, b) => (a.data || '').localeCompare(b.data || ''))) {
-      let amt = num(pg.valor); const din = /dinheiro/i.test(pg.forma || '');
-      while (amt > 0.005 && i < its.length) {
-        const take = Math.min(amt, rest); if (din) cash[i] += take; amt -= take; rest -= take;
-        if (rest <= 0.005) { i++; rest = i < its.length ? its[i].valor : 0; }
-      }
-    }
-    its.forEach((it, k) => { const f = it.valor > 0 ? Math.min(1, cash[k] / it.valor) : 0; for (const x of it.ss) out.set(x.id, f); });
-  }
-  return out;
+/* dinheiro em caixa: a Duda não usa o dinheiro recebido; todo ele vai para o repasse das plataformas
+   de APP.repasseDinheiro, e o que faltar é pago por Pix. */
+const isDin = x => /dinheiro/i.test(x.forma || '');
+const dinheiroRecebido = month => Math.round(sum(db.payments.filter(p => isDin(p) && (!month || (p.data || '').startsWith(month))), p => p.valor) * 100) / 100;
+function caixaDinheiro() {  // recebido em dinheiro menos o que já foi usado para pagar repasse
+  const usado = sum(db.repassesPagos.filter(r => isDin(r) && (APP.repasseDinheiro || []).includes(r.plataformaId)), r => r.valor);
+  return Math.max(0, Math.round((dinheiroRecebido() - usado) * 100) / 100);
 }
 function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mês (e a parte paga em dinheiro)
-  const fd = fracDinheiro();
+  const caixa = caixaDinheiro(), recMes = dinheiroRecebido(month);
   return (db.settings.plataformas || []).map(pl => {
-    const ss = db.sessions.filter(s => platOf(s) === pl.id && billable(s));
+    const ss = db.sessions.filter(s => platOf(s) === pl.id && billable(s)), din = (APP.repasseDinheiro || []).includes(pl.id);
     const devido = sum(ss, repasseOf), pago = sum(db.repassesPagos.filter(r => r.plataformaId === pl.id), r => r.valor);
     const mes = sum(ss.filter(s => s.data.startsWith(month)), repasseOf);
     const pacientes = db.patients.filter(p => p.plataformaId === pl.id && p.status === 'ativo').length;
-    const mesDinheiro = Math.round(sum(ss.filter(s => s.data.startsWith(month)), s => repasseOf(s) * (fd.get(s.id) || 0)) * 100) / 100;
-    // a pagar, separado: repasse das sessões pagas em dinheiro menos o já pago em dinheiro; o resto, por Pix
-    const devDin = sum(ss, s => repasseOf(s) * (fd.get(s.id) || 0)), pagos = db.repassesPagos.filter(r => r.plataformaId === pl.id);
-    const pagoDin = sum(pagos.filter(r => /dinheiro/i.test(r.forma || '')), r => r.valor), pagoPix = pago - pagoDin;
-    const saldoDinheiro = Math.max(0, Math.round((devDin - pagoDin) * 100) / 100), saldoPix = Math.max(0, Math.round((devido - devDin - pagoPix) * 100) / 100);
-    return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, mesDinheiro, mesPix: Math.round((mes - mesDinheiro) * 100) / 100, saldoDinheiro, saldoPix, pacientes, n: ss.length };
+    const saldo = Math.round((devido - pago) * 100) / 100;
+    // primeiro todo o dinheiro recebido; o que faltar, por Pix
+    const mesDinheiro = din ? Math.round(Math.min(mes, recMes) * 100) / 100 : 0;
+    const saldoDinheiro = din ? Math.max(0, Math.min(saldo, caixa)) : 0, saldoPix = Math.max(0, Math.round((saldo - saldoDinheiro) * 100) / 100);
+    return { pl, devido, pago, saldo, mes, mesDinheiro, mesPix: Math.round((mes - mesDinheiro) * 100) / 100, saldoDinheiro, saldoPix, pacientes, n: ss.length };
   });
 }
 /* cobrança: por sessão (padrão) ou mensal (valor fixo por mês, qualquer que seja o número de sessões).
@@ -1435,13 +1423,12 @@ const CT = id => db.contas.find(c => c.id === id);
 function vencimento(c, ym) { const last = new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).getDate(); return `${ym}-${pad(Math.min(Math.max(1, num(c.dia) || 1), last))}`; }
 function contaMes(c, ym) {  // situação da conta no mês ym
   const venc = vencimento(c, ym), pl = c.plataformaId ? PLAT(c.plataformaId) : null, comp = ymAdd(ym, -1);
-  let previsto = num(c.valor) || 0, pago = null, parcial = 0, pagoDin = 0;
+  let previsto = num(c.valor) || 0, pago = null, parcial = 0;
   if (pl) {
     const total = Math.round(sum(db.sessions.filter(s => platOf(s) === pl.id && billable(s) && s.data.startsWith(comp)), repasseOf) * 100) / 100;
     // pagamentos antigos, sem o mês dos atendimentos, contam para o mês anterior ao do pagamento
     const r = db.repassesPagos.filter(r => r.plataformaId === pl.id && (r.competencia || ymAdd((r.data || '').slice(0, 7), -1)) === comp);
     const pagoV = Math.round(sum(r, x => x.valor) * 100) / 100;
-    pagoDin = sum(r.filter(x => /dinheiro/i.test(x.forma || '')), x => x.valor);
     if (r.length && pagoV >= total - 0.005) pago = { data: r.map(x => x.data).sort().pop(), valor: pagoV, repasse: true };
     else if (r.length) parcial = pagoV;  // pago só em parte: continua aberta pelo que falta
     previsto = pago ? total : Math.round((total - pagoV) * 100) / 100;
@@ -1451,8 +1438,8 @@ function contaMes(c, ym) {  // situação da conta no mês ym
   }
   const dias = daysUntil(venc), semNada = pl && !pago && previsto < 0.005;
   let dinheiro = 0;
-  if (pl && previsto > 0 && (APP.repasseDinheiro || []).includes(pl.id)) {  // quanto do que falta sai do dinheiro recebido
-    const r = repasseResumo(comp).find(x => x.pl.id === pl.id); dinheiro = r ? Math.max(0, Math.min(previsto, Math.round((r.mesDinheiro - (pago ? 0 : pagoDin)) * 100) / 100)) : 0;
+  if (pl && previsto > 0 && (APP.repasseDinheiro || []).includes(pl.id)) {  // o que falta sai primeiro do dinheiro em caixa
+    dinheiro = Math.min(previsto, caixaDinheiro());
   }
   return { c, ym, venc, dias, previsto, pago, parcial, pl, comp, semNada, aberta: !pago && !semNada, dinheiro };
 }
