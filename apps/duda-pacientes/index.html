@@ -260,6 +260,16 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  contas: {  // contas do mês (só nesta versão); as de plataforma pagam o repasse do mês anterior
+    padrao: [
+      { id: 'ctrecanto', nome: 'Recanto das Borboletas (repasse)', dia: 5, plataformaId: 'plrecanto' },
+      { id: 'ctsameca', nome: 'Sameca (repasse)', dia: 10, plataformaId: 'plsameca' },
+      { id: 'ctsalario', nome: 'Salário', dia: 10 },
+      { id: 'ctinss', nome: 'INSS', dia: 10 },
+      { id: 'ctcontadora', nome: 'Contadora', dia: 10 },
+      { id: 'ctsimples', nome: 'Simples Nacional', dia: 20 },
+    ],
+  },
 };
 const STORE = `${APP.chave}.pacientes.vault.v1`;
 const AUTOLOCK_MIN = 15;
@@ -423,13 +433,21 @@ function emptyDB() {
   return { v: 1, patients: [], sessions: [], payments: [], invoices: [], contacts: [], records: [], settings: {} };
 }
 function migrate(d) {
-  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos']) if (!Array.isArray(d[k])) d[k] = [];
+  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais', backupDias: 7, ultimoBackup: '', backupAdiado: '' }, d.settings || {});
   if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
   if (!d.settings.platSeed) {  // plataformas padrão desta versão (uma vez só; se excluídas, não voltam)
     d.settings.platSeed = 1;
     const has = n => d.settings.plataformas.some(x => String(x.nome || '').toLowerCase().includes(n.toLowerCase().split(' ')[0]));
     for (const pl of APP.plataformasPadrao) if (!has(pl.nome)) d.settings.plataformas.push(JSON.parse(JSON.stringify(pl)));
+  }
+  if (APP.contas && !d.settings.contasSeed) {  // contas mensais padrão desta versão (uma vez só)
+    d.settings.contasSeed = 1;
+    for (const c of APP.contas.padrao) if (!d.contas.some(x => x.id === c.id)) {
+      const ct = { valor: '', ativa: true, desde: toISO(new Date()).slice(0, 7), ...JSON.parse(JSON.stringify(c)) };
+      if (ct.plataformaId && !d.settings.plataformas.some(pl => pl.id === ct.plataformaId)) delete ct.plataformaId;
+      d.contas.push(ct);
+    }
   }
   for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.docs ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
@@ -583,14 +601,14 @@ let cloudTimer = null, cloudBusy = false, cloudSeen = 0, legacyCleanup = false, 
 const PART_KEYS = ['sessions', 'payments', 'invoices', 'contacts', 'records'];
 const partId = pid => 'p-' + String(pid).replace(/[^A-Za-z0-9_-]/g, '_');
 function splitDB(d) {
-  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos } }, by = {};
+  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas } }, by = {};
   for (const p of d.patients) by[p.id] = parts[partId(p.id)] = { patient: p, sessions: [], payments: [], invoices: [], contacts: [], records: [] };
   for (const k of PART_KEYS) for (const r of d[k]) by[r.pacienteId]?.[k].push(r);
   return parts;
 }
 function joinDB(parts) {
   const d = emptyDB(), c = parts.core || {};
-  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || [];
+  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || [];
   for (const [id, x] of Object.entries(parts)) {
     if (id === 'core' || !x?.patient) continue;
     d.patients.push(x.patient);
@@ -1317,18 +1335,112 @@ actions['del-plat'] = async ({ id }) => {
 const repFields = () => [
   { k: 'plataformaId', l: 'Plataforma', t: 'select', req: true, opts: db.settings.plataformas.map(pl => [pl.id, pl.nome]) },
   { k: 'data', l: 'Data do pagamento', t: 'date', req: true }, { k: 'valor', l: 'Valor pago (R$)', t: 'money', req: true },
+  { k: 'competencia', l: 'Atendimentos do mês', t: 'month' },
   { k: 'forma', l: 'Forma de pagamento', t: 'select', opts: PAY_FORMS }, { k: 'referencia', l: 'Referente a', ph: 'Ex.: atendimentos de setembro' },
   { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
 ];
 actions['pay-plat'] = ({ id }) => {
   if (!db.settings.plataformas.length) { notice('Cadastre uma plataforma primeiro.'); return; }
   const r = repasseResumo(today().slice(0, 7)).find(x => x.pl.id === (id || db.settings.plataformas[0].id));
-  openForm({ title: 'Registrar pagamento de repasse', fields: repFields(), values: { plataformaId: r.pl.id, data: today(), forma: 'Pix', valor: r.saldo > 0 ? r.saldo : '', referencia: `Atendimentos até ${fmtD(today())}` },
+  openForm({ title: 'Registrar pagamento de repasse', fields: repFields(), values: { plataformaId: r.pl.id, data: today(), forma: 'Pix', valor: r.saldo > 0 ? r.saldo : '', competencia: addMonths(today().slice(0, 8) + '01', -1).slice(0, 7), referencia: `Atendimentos até ${fmtD(today())}` },
     intro: r.saldo > 0 ? `<div class="alert info">A pagar para ${esc(r.pl.nome)}: <b>${money(r.saldo)}</b>.</div>` : '',
     onSave: async v => { if (!v.valor) { notice('Informe o valor.'); return false; } db.repassesPagos.push({ id: uid(), ...v }); await commit('Pagamento de repasse registrado.'); } });
 };
 actions['edit-rep'] = ({ id }) => { const r = db.repassesPagos.find(x => x.id === id); openForm({ title: 'Editar pagamento de repasse', fields: repFields(), values: r, onSave: async v => { Object.assign(r, v); await commit('Pagamento atualizado.'); } }); };
 actions['del-rep'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este pagamento de repasse?', ok: 'Excluir', danger: true }))) return; db.repassesPagos = db.repassesPagos.filter(x => x.id !== id); await commit('Pagamento excluído.'); };
+
+/* contas do mês: vencimentos fixos (repasses, salário, impostos…), com o que já foi pago em cada mês */
+const ymAdd = (ym, n) => addMonths(ym + '-01', n).slice(0, 7);
+const CT = id => db.contas.find(c => c.id === id);
+function vencimento(c, ym) { const last = new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).getDate(); return `${ym}-${pad(Math.min(Math.max(1, num(c.dia) || 1), last))}`; }
+function contaMes(c, ym) {  // situação da conta no mês ym
+  const venc = vencimento(c, ym), pl = c.plataformaId ? PLAT(c.plataformaId) : null, comp = ymAdd(ym, -1);
+  let previsto = num(c.valor) || 0, pago = null;
+  if (pl) {
+    previsto = Math.round(sum(db.sessions.filter(s => platOf(s) === pl.id && billable(s) && s.data.startsWith(comp)), repasseOf) * 100) / 100;
+    // pagamentos antigos, sem o mês dos atendimentos, contam para o mês anterior ao do pagamento
+    const r = db.repassesPagos.filter(r => r.plataformaId === pl.id && (r.competencia || ymAdd((r.data || '').slice(0, 7), -1)) === comp);
+    if (r.length) pago = { data: r.map(x => x.data).sort().pop(), valor: sum(r, x => x.valor), repasse: true };
+  } else {
+    const r = db.contasPagas.find(x => x.contaId === c.id && x.mes === ym);
+    if (r) pago = { data: r.data, valor: num(r.valor), id: r.id };
+  }
+  const dias = daysUntil(venc), semNada = pl && !pago && previsto < 0.005;
+  return { c, ym, venc, dias, previsto, pago, pl, comp, semNada, aberta: !pago && !semNada };
+}
+function contaBadge(x) {
+  if (x.pago) return badge(`paga ${fmtD(x.pago.data).slice(0, 5)}`, 'ok');
+  if (x.semNada) return badge('sem repasse no mês', '');
+  if (x.dias < 0) return badge(`atrasada ${-x.dias} dia${x.dias === -1 ? '' : 's'}`, 'bad');
+  if (x.dias === 0) return badge('vence hoje', 'warn');
+  if (x.dias <= 5) return badge(`vence em ${x.dias} dia${x.dias === 1 ? '' : 's'}`, 'warn');
+  return badge(`vence ${fmtD(x.venc).slice(0, 5)}`, '');
+}
+const contasDoMes = ym => db.contas.filter(c => c.ativa !== false && !(c.desde && ym < c.desde)).map(c => contaMes(c, ym)).sort((a, b) => a.venc.localeCompare(b.venc) || a.c.nome.localeCompare(b.c.nome));
+const contaFields = () => [
+  { k: 'nome', l: 'Nome da conta', req: true, w: 'full', ph: 'Ex.: Aluguel da sala' },
+  { k: 'dia', l: 'Vence todo dia', t: 'number', req: true },
+  { k: 'valor', l: 'Valor previsto (R$)', t: 'money', hint: 'Opcional. Se o valor muda todo mês, deixe em branco e informe ao pagar.' },
+  { k: 'plataformaId', l: 'É o repasse de uma plataforma?', t: 'select', opts: [['', 'Não'], ...(db.settings.plataformas || []).map(pl => [pl.id, pl.nome])], hint: 'Se for, o valor é o repasse dos atendimentos do mês anterior, calculado sozinho.' },
+  { k: 'ativa', l: 'Conta ativa (aparece todo mês)', t: 'checkbox' },
+  { k: 'obs', l: 'Observações', t: 'textarea', rows: 2, ph: 'Ex.: chave Pix, código de barras, login do portal…' },
+];
+actions['new-conta'] = () => openForm({ title: 'Nova conta mensal', fields: contaFields(), values: { ativa: true, dia: 10 },
+  onSave: async v => { db.contas.push({ id: 'ct' + uid().replace(/-/g, '').slice(0, 8), desde: today().slice(0, 7), ...v, dia: Math.min(31, Math.max(1, parseInt(v.dia) || 1)) }); await commit('Conta cadastrada.'); } });
+actions['edit-conta'] = ({ id }) => { const c = CT(id); openForm({ title: 'Editar conta', fields: contaFields(), values: { ...c, ativa: c.ativa !== false },
+  onSave: async v => { Object.assign(c, v, { dia: Math.min(31, Math.max(1, parseInt(v.dia) || 1)) }); await commit('Conta atualizada.'); } }); };
+actions['del-conta'] = async ({ id }) => {
+  const c = CT(id);
+  if (!(await ask({ title: `Excluir “${c.nome}”?`, text: 'Os pagamentos já registrados continuam no histórico. Para só parar de aparecer, você também pode editar e desmarcar “Conta ativa”.', ok: 'Excluir', danger: true }))) return;
+  db.contas = db.contas.filter(x => x.id !== id); await commit('Conta excluída.');
+};
+actions['pay-conta'] = ({ id, ym }) => {
+  const x = contaMes(CT(id), ym);
+  openForm({ title: `Pagar ${x.c.nome}`, saveLabel: 'Registrar pagamento',
+    intro: `<p class="muted">Vencimento: ${fmtD(x.venc)}.${x.pl ? ` Repasse dos atendimentos de ${fmtMonth(x.comp)}: <b>${money(x.previsto)}</b>.` : ''}${x.c.obs ? `<br>${esc(x.c.obs)}` : ''}</p>`,
+    fields: [{ k: 'data', l: 'Data do pagamento', t: 'date', req: true }, { k: 'valor', l: 'Valor pago (R$)', t: 'money', req: true },
+      { k: 'forma', l: 'Forma de pagamento', t: 'select', opts: PAY_FORMS }, { k: 'obs', l: 'Observações', w: 'full' }],
+    values: { data: today(), valor: x.previsto || '', forma: 'Pix' },
+    onSave: async v => {
+      if (!hasVal(v.valor)) { notice('Informe o valor pago.'); return false; }
+      if (x.pl) db.repassesPagos.push({ id: uid(), plataformaId: x.pl.id, data: v.data, valor: v.valor, forma: v.forma, competencia: x.comp, referencia: `Atendimentos de ${fmtMonth(x.comp)}`, obs: v.obs });
+      else db.contasPagas.push({ id: uid(), contaId: x.c.id, mes: ym, data: v.data, valor: v.valor, forma: v.forma, obs: v.obs });
+      await commit(`${x.c.nome}: pagamento registrado.`);
+    } });
+};
+actions['unpay-conta'] = async ({ id, ym }) => {
+  const x = contaMes(CT(id), ym);
+  if (!(await ask({ title: `Desfazer o pagamento de ${x.c.nome}?`, text: `${fmtMonth(ym)} · ${money(x.pago.valor)} em ${fmtD(x.pago.data)}.`, ok: 'Desfazer', danger: true }))) return;
+  if (x.pl) db.repassesPagos = db.repassesPagos.filter(r => !(r.plataformaId === x.pl.id && (r.competencia || ymAdd((r.data || '').slice(0, 7), -1)) === x.comp));
+  else db.contasPagas = db.contasPagas.filter(r => r.id !== x.pago.id);
+  await commit('Pagamento desfeito.');
+};
+function contaRow(x, { mostrarMes = false } = {}) {
+  const val = x.pago ? money(x.pago.valor) : x.previsto ? money(x.previsto) : '<span class="muted">a informar</span>';
+  return `<tr><td><b>${esc(x.c.nome)}</b><div class="muted">dia ${num(x.c.dia)}${mostrarMes ? ' · ' + esc(fmtMonth(x.ym)) : ''}${x.pl ? ` · atendimentos de ${esc(MONTHS[Number(x.comp.slice(5)) - 1])}` : ''}</div></td>
+    <td class="num">${val}</td><td>${contaBadge(x)}</td>
+    <td class="acts">${x.aberta ? `<button class="btn sm" data-act="pay-conta" data-id="${x.c.id}" data-ym="${x.ym}">Pagar</button>` : ''}${x.pago ? menu([['unpay-conta', 'Desfazer pagamento', { id: x.c.id, ym: x.ym }, 'danger']]) : ''}</td></tr>`;
+}
+function contasCard() {  // tela inicial: atrasadas do mês passado, as deste mês e, a partir do dia 25, as do próximo
+  if (!APP.contas || !db.contas.length) return '';
+  const ym = today().slice(0, 7), atras = contasDoMes(ymAdd(ym, -1)).filter(x => x.aberta), atual = contasDoMes(ym);
+  const prox = Number(today().slice(8)) >= 25 ? contasDoMes(ymAdd(ym, 1)) : [];
+  const abertoMes = sum(atual.filter(x => x.aberta), x => x.previsto);
+  return `<div class="card"><div class="head" style="margin-bottom:6px"><h2 style="margin:0">Contas do mês</h2><a class="muted" href="#/financeiro">ver todas</a></div>
+    <p class="muted" style="margin:0 0 6px">${atual.filter(x => x.aberta).length ? `Falta pagar em ${esc(MONTHS[Number(ym.slice(5)) - 1])}: <b>${money(abertoMes)}</b>${atual.some(x => x.aberta && !x.previsto) ? ' + valores a informar' : ''}` : 'Tudo pago neste mês.'}</p>
+    <div class="tw"><table><tbody>${[...atras.map(x => contaRow(x, { mostrarMes: true })), ...atual.map(x => contaRow(x))].join('')}</tbody></table></div>
+    ${prox.length ? `<h3 style="margin:12px 0 4px">Próximo mês · ${esc(fmtMonth(ymAdd(ym, 1)))}</h3><div class="tw"><table><tbody>${prox.map(x => contaRow(x)).join('')}</tbody></table></div>` : ''}</div>`;
+}
+function contasFinCard(month) {
+  if (!APP.contas) return '';
+  const lista = contasDoMes(month), inativas = db.contas.filter(c => c.ativa === false);
+  const pago = sum(lista.filter(x => x.pago), x => x.pago.valor), aberto = sum(lista.filter(x => x.aberta), x => x.previsto);
+  return `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Contas mensais · ${esc(fmtMonth(month))}</h2><button class="btn sm primary" data-act="new-conta">+ Conta</button></div>
+    ${lista.length ? `<p class="muted" style="margin:0 0 6px">Pago: <b>${money(pago)}</b> · falta pagar: <b>${money(aberto)}</b>${lista.some(x => x.aberta && !x.previsto) ? ' + valores a informar' : ''}</p>
+      <div class="tw"><table><thead><tr><th>Conta</th><th class="num">Valor</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map(x => contaRow(x).replace('</td></tr>', ` ${menu([['edit-conta', 'Editar conta', { id: x.c.id }], ['del-conta', 'Excluir conta', { id: x.c.id }, 'danger']])}</td></tr>`)).join('')}</tbody></table></div>`
+      : '<p class="muted" style="margin:0">Nenhuma conta cadastrada. Use “+ Conta” para cadastrar salário, impostos, aluguel etc.</p>'}
+    ${inativas.length ? `<p class="muted" style="margin:8px 0 0">Inativas: ${inativas.map(c => `<a href="#" data-act="edit-conta" data-id="${c.id}">${esc(c.nome)}</a>`).join(', ')}</p>` : ''}</div>`;
+}
 
 /* responsáveis */
 const guardianFields = () => [
@@ -2059,6 +2171,9 @@ function vDashboard() {
     <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button><button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
+      ${(() => { if (!APP.contas || !db.contas.length) return ''; const ym = today().slice(0, 7);
+        const ab = [...contasDoMes(ymAdd(ym, -1)), ...contasDoMes(ym)].filter(x => x.aberta), atras = ab.filter(x => x.dias < 0).length;
+        return `<div class="stat ${atras ? 'bad' : ab.length ? 'warn' : ''}"><b>${ab.length}</b><span>conta(s) a pagar${atras ? ` · ${atras} atrasada(s)` : ''}</span></div>`; })()}
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
       <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span></div>
       <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
@@ -2073,6 +2188,7 @@ function vDashboard() {
     <div class="cols">
       <div class="card"><h2>Próximos 7 dias</h2>${sessTable(upcoming)}</div>
       <div>
+        ${contasCard()}
         <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${(() => { const r = c.p.responsaveis.find(r => waLink(r.telefone)); return r ? `<a class="wa" href="${waLink(r.telefone)}" target="_blank" rel="noopener" title="WhatsApp de ${esc(r.nome)}">WhatsApp ${esc(r.nome.split(' ')[0])}</a>` : ''; })()}</td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
         <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<div class="empty">Tudo em dia. 🌿</div>'}</div>
         ${reps.length ? `<div class="card"><h2>Repasses às plataformas</h2><div class="tw"><table><tbody>${reps.map(r => `<tr><td><b>${esc(r.pl.nome)}</b><div class="muted">${esc(MONTHS[Number(month.slice(5)) - 1])}: ${money(r.mes)} · ${esc(platRegra(r.pl))}</div></td>
@@ -2278,6 +2394,7 @@ function vFinance() {
           + `<div class="stat"><b>${money(billed - repMes)}</b><span>líquido das sessões do mês (após ${ativas.length > 1 ? `${money(repMes)} de repasses` : 'repasses'})</span></div>`;
       })()}</div>
       ${Object.keys(byForm).length ? `<div class="row" style="margin-top:12px">${Object.entries(byForm).map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''}</div>
+    ${contasFinCard(month)}
     ${platCard(reps, repPagosMes, month)}
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
     <div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>
