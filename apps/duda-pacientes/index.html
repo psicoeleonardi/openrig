@@ -260,6 +260,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  repasseDinheiro: ['plrecanto'],  // plataformas com o repasse separado em Pix e dinheiro no Financeiro
   contas: {  // contas do mês (só nesta versão); as de plataforma pagam o repasse do mês anterior
     padrao: [
       { id: 'ctrecanto', nome: 'Recanto das Borboletas (repasse)', dia: 5, plataformaId: 'plrecanto' },
@@ -491,13 +492,34 @@ function platRegra(pl) {
   }
   return pl.tipo === 'percentual' ? `${pct(pl.valor)} do valor da sessão` : `${money(pl.valor)} por atendimento`;
 }
-function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mês
+/* quanto de cada sessão foi pago em dinheiro: os pagamentos do paciente quitam o que foi cobrado
+   (sessões e mensalidades) do mais antigo para o mais novo; o repasse da parte paga em dinheiro
+   pode sair desse dinheiro, o resto é pago por Pix. */
+function fracDinheiro() {
+  const out = new Map();
+  for (const p of db.patients) {
+    const its = itensCobrados(p); if (!its.length) continue;
+    const cash = its.map(() => 0); let i = 0, rest = its[0].valor;
+    for (const pg of paysOf(p.id).slice().sort((a, b) => (a.data || '').localeCompare(b.data || ''))) {
+      let amt = num(pg.valor); const din = /dinheiro/i.test(pg.forma || '');
+      while (amt > 0.005 && i < its.length) {
+        const take = Math.min(amt, rest); if (din) cash[i] += take; amt -= take; rest -= take;
+        if (rest <= 0.005) { i++; rest = i < its.length ? its[i].valor : 0; }
+      }
+    }
+    its.forEach((it, k) => { const f = it.valor > 0 ? Math.min(1, cash[k] / it.valor) : 0; for (const x of it.ss) out.set(x.id, f); });
+  }
+  return out;
+}
+function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mês (e a parte paga em dinheiro)
+  const fd = fracDinheiro();
   return (db.settings.plataformas || []).map(pl => {
     const ss = db.sessions.filter(s => platOf(s) === pl.id && billable(s));
     const devido = sum(ss, repasseOf), pago = sum(db.repassesPagos.filter(r => r.plataformaId === pl.id), r => r.valor);
     const mes = sum(ss.filter(s => s.data.startsWith(month)), repasseOf);
     const pacientes = db.patients.filter(p => p.plataformaId === pl.id && p.status === 'ativo').length;
-    return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, pacientes, n: ss.length };
+    const mesDinheiro = Math.round(sum(ss.filter(s => s.data.startsWith(month)), s => repasseOf(s) * (fd.get(s.id) || 0)) * 100) / 100;
+    return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, mesDinheiro, mesPix: Math.round((mes - mesDinheiro) * 100) / 100, pacientes, n: ss.length };
   });
 }
 /* cobrança: por sessão (padrão) ou mensal (valor fixo por mês, qualquer que seja o número de sessões).
@@ -515,8 +537,9 @@ function mensalidades(p) {  // [{ ym, valor }] dos meses cobrados como mensais
   return meses.map(ym => ({ ym, valor: num(cobrancaEm(p, ym).valor) }));
 }
 function itensCobrados(p) {  // tudo o que foi cobrado do paciente, em ordem: sessões avulsas e mensalidades
-  return [...sessOf(p.id).filter(s => billable(s) && porSessao(s)).map(s => ({ data: s.data, valor: num(s.valor), rot: fmtD(s.data).slice(0, 5), sessao: true })),
-    ...mensalidades(p).map(m => ({ data: m.ym + '-31', valor: m.valor, rot: 'mensalidade de ' + MONTHS[Number(m.ym.slice(5)) - 1], sessao: false }))].sort((a, b) => a.data.localeCompare(b.data));
+  return [...sessOf(p.id).filter(s => billable(s) && porSessao(s)).map(s => ({ data: s.data, valor: num(s.valor), rot: fmtD(s.data).slice(0, 5), sessao: true, ss: [s] })),
+    ...mensalidades(p).map(m => ({ data: m.ym + '-31', valor: m.valor, rot: 'mensalidade de ' + MONTHS[Number(m.ym.slice(5)) - 1], sessao: false,
+      ss: sessOf(p.id).filter(s => billable(s) && s.data.startsWith(m.ym)) }))].sort((a, b) => a.data.localeCompare(b.data));
 }
 function balance(pid) {
   const p = P(pid), due = sum(itensCobrados(p), x => x.valor), paid = sum(paysOf(pid), x => x.valor);
@@ -1416,7 +1439,9 @@ function contaMes(c, ym) {  // situação da conta no mês ym
     if (r) pago = { data: r.data, valor: num(r.valor), id: r.id };
   }
   const dias = daysUntil(venc), semNada = pl && !pago && previsto < 0.005;
-  return { c, ym, venc, dias, previsto, pago, pl, comp, semNada, aberta: !pago && !semNada };
+  let dinheiro = 0;
+  if (pl && previsto > 0 && (APP.repasseDinheiro || []).includes(pl.id)) { const r = repasseResumo(comp).find(x => x.pl.id === pl.id); dinheiro = r ? r.mesDinheiro : 0; }
+  return { c, ym, venc, dias, previsto, pago, pl, comp, semNada, aberta: !pago && !semNada, dinheiro };
 }
 function contaBadge(x) {
   if (x.pago) return badge(`paga ${fmtD(x.pago.data).slice(0, 5)}`, 'ok');
@@ -1468,7 +1493,7 @@ actions['unpay-conta'] = async ({ id, ym }) => {
 function contaRow(x, { mostrarMes = false } = {}) {
   const val = x.pago ? money(x.pago.valor) : x.previsto ? money(x.previsto) : '<span class="muted">a informar</span>';
   return `<tr><td><b>${esc(x.c.nome)}</b><div class="muted">dia ${num(x.c.dia)}${mostrarMes ? ' · ' + esc(fmtMonth(x.ym)) : ''}${x.pl ? ` · atendimentos de ${esc(MONTHS[Number(x.comp.slice(5)) - 1])}` : ''}</div></td>
-    <td class="num">${val}</td><td>${contaBadge(x)}</td>
+    <td class="num">${val}${x.dinheiro > 0.005 ? `<div class="muted">${money(x.dinheiro)} dinheiro · ${money(x.previsto - x.dinheiro)} Pix</div>` : ''}</td><td>${contaBadge(x)}</td>
     <td class="acts">${x.aberta ? `<button class="btn sm" data-act="pay-conta" data-id="${x.c.id}" data-ym="${x.ym}">Pagar</button>` : ''}${x.pago ? menu([['unpay-conta', 'Desfazer pagamento', { id: x.c.id, ym: x.ym }, 'danger']]) : ''}</td></tr>`;
 }
 function contasCard() {  // tela inicial: atrasadas do mês passado, as deste mês e, a partir do dia 25, as do próximo
@@ -2444,7 +2469,9 @@ function vFinance() {
         const ativas = reps.filter(r => r.mes > 0.005 || r.pacientes || r.saldo > 0.005);
         if (!ativas.length) return '';
         const mesNome = MONTHS[Number(month.slice(5)) - 1];
-        return ativas.map(r => `<div class="stat"><b>${money(r.mes)}</b><span>repasse ${esc(r.pl.nome)} em ${mesNome}</span></div>`).join('')
+        return ativas.map(r => (APP.repasseDinheiro || []).includes(r.pl.id)
+            ? `<div class="stat"><b>${money(r.mesPix)}</b><span>repasse ${esc(r.pl.nome)} · Pix em ${mesNome}</span></div><div class="stat"><b>${money(r.mesDinheiro)}</b><span>repasse ${esc(r.pl.nome)} · dinheiro em ${mesNome}</span></div>`
+            : `<div class="stat"><b>${money(r.mes)}</b><span>repasse ${esc(r.pl.nome)} em ${mesNome}</span></div>`).join('')
           + `<div class="stat"><b>${money(billed - repMes)}</b><span>líquido das sessões do mês (após ${ativas.length > 1 ? `${money(repMes)} de repasses` : 'repasses'})</span></div>`;
       })()}</div>
       ${Object.keys(byForm).length ? `<div class="row" style="margin-top:12px">${Object.entries(byForm).map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''}</div>
