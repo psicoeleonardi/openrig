@@ -226,6 +226,7 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
     <div class="brand">Consultório</div>
     <nav class="nav" id="nav">
       <a href="#/inicio" data-page="inicio">Início</a>
+      <a href="#/tarefas" data-page="tarefas" id="navTarefas" hidden>Tarefas</a>
       <a href="#/pacientes" data-page="pacientes">Pacientes</a>
       <a href="#/agenda" data-page="agenda">Agenda</a>
       <a href="#/financeiro" data-page="financeiro">Financeiro</a>
@@ -260,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  tarefas: true,  // aba Tarefas (as abertas aparecem em Pendências)
   repasseDinheiro: ['plrecanto'],  // plataformas com o repasse separado em Pix e dinheiro no Financeiro
   contas: {  // contas do mês (só nesta versão); as de plataforma pagam o repasse do mês anterior
     padrao: [
@@ -434,7 +436,7 @@ function emptyDB() {
   return { v: 1, patients: [], sessions: [], payments: [], invoices: [], contacts: [], records: [], settings: {} };
 }
 function migrate(d) {
-  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas']) if (!Array.isArray(d[k])) d[k] = [];
+  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas', 'tarefas']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais', backupDias: 7, ultimoBackup: '', backupAdiado: '' }, d.settings || {});
   if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
   if (!d.settings.platSeed) {  // plataformas padrão desta versão (uma vez só; se excluídas, não voltam)
@@ -657,14 +659,14 @@ let cloudTimer = null, cloudBusy = false, cloudSeen = 0, legacyCleanup = false, 
 const PART_KEYS = ['sessions', 'payments', 'invoices', 'contacts', 'records'];
 const partId = pid => 'p-' + String(pid).replace(/[^A-Za-z0-9_-]/g, '_');
 function splitDB(d) {
-  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas } }, by = {};
+  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas, tarefas: d.tarefas } }, by = {};
   for (const p of d.patients) by[p.id] = parts[partId(p.id)] = { patient: p, sessions: [], payments: [], invoices: [], contacts: [], records: [] };
   for (const k of PART_KEYS) for (const r of d[k]) by[r.pacienteId]?.[k].push(r);
   return parts;
 }
 function joinDB(parts) {
   const d = emptyDB(), c = parts.core || {};
-  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || [];
+  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || []; d.tarefas = c.tarefas || [];
   for (const [id, x] of Object.entries(parts)) {
     if (id === 'core' || !x?.patient) continue;
     d.patients.push(x.patient);
@@ -1517,6 +1519,62 @@ function contasFinCard(month) {
     ${inativas.length ? `<p class="muted" style="margin:8px 0 0">Inativas: ${inativas.map(c => `<a href="#" data-act="edit-conta" data-id="${c.id}">${esc(c.nome)}</a>`).join(', ')}</p>` : ''}</div>`;
 }
 
+/* tarefas: lista simples; as abertas aparecem em Pendências na tela inicial */
+const tarefasAbertas = () => (db.tarefas || []).filter(t => !t.feita).sort((a, b) => (a.prazo || '9999').localeCompare(b.prazo || '9999') || (a.criadaEm || '').localeCompare(b.criadaEm || ''));
+function prazoBadge(t) {
+  if (!t.prazo) return '';
+  const d = daysUntil(t.prazo);
+  return ' ' + (d < 0 ? badge(`atrasada ${-d} dia${d === -1 ? '' : 's'}`, 'bad') : d === 0 ? badge('hoje', 'warn') : d === 1 ? badge('amanhã', 'warn') : badge(`até ${fmtD(t.prazo).slice(0, 5)}`, d <= 3 ? 'warn' : ''));
+}
+function tarefaLi(t) {  // item de Pendências, com caixinha para concluir
+  const pc = t.pacienteId && P(t.pacienteId);
+  return `<li style="list-style:none;margin-left:-18px"><label class="check" style="display:inline-flex;font-size:inherit"><input type="checkbox" data-act="toggle-task" data-id="${t.id}"> ${esc(t.titulo)}</label>${pc ? ` <span class="muted">· <a href="#/p/${pc.id}/dados">${esc(pc.nome)}</a></span>` : ''}${prazoBadge(t)}</li>`;
+}
+const tarefaFields = () => [
+  { k: 'titulo', l: 'Tarefa', req: true, w: 'full' }, { k: 'prazo', l: 'Prazo (opcional)', t: 'date' },
+  { k: 'pacienteId', l: 'Paciente (opcional)', t: 'select', opts: [['', '—'], ...db.patients.filter(p => p.status !== 'inativo').sort((a, b) => a.nome.localeCompare(b.nome)).map(p => [p.id, p.nome])] },
+  { k: 'obs', l: 'Detalhes', t: 'textarea', rows: 3 },
+];
+actions['add-task'] = async () => {
+  const f = $('#taskQuick'); const titulo = f.titulo.value.trim();
+  if (!titulo) { f.titulo.focus(); return; }
+  db.tarefas.push({ id: 't' + uid().replace(/-/g, '').slice(0, 10), titulo, prazo: f.prazo.value || '', pacienteId: f.pacienteId.value || '', obs: '', feita: false, criadaEm: new Date().toISOString() });
+  await commit('Tarefa adicionada. Ela aparece em Pendências.');
+  $('#taskQuick [name=titulo]')?.focus();
+};
+actions['toggle-task'] = async ({ id }) => {
+  const t = db.tarefas.find(x => x.id === id); if (!t) return;
+  t.feita = !t.feita; t.feitaEm = t.feita ? new Date().toISOString() : '';
+  await commit(t.feita ? `Concluída: ${t.titulo}` : 'Tarefa reaberta.');
+};
+actions['edit-task'] = ({ id }) => { const t = db.tarefas.find(x => x.id === id); openForm({ title: 'Editar tarefa', fields: tarefaFields(), values: t, onSave: async v => { Object.assign(t, v); await commit('Tarefa atualizada.'); } }); };
+actions['del-task'] = async ({ id }) => {
+  const t = db.tarefas.find(x => x.id === id);
+  if (!(await ask({ title: 'Excluir esta tarefa?', text: t.titulo, ok: 'Excluir', danger: true }))) return;
+  db.tarefas = db.tarefas.filter(x => x.id !== id); await commit('Tarefa excluída.');
+};
+actions['clear-done'] = async () => {
+  const n = db.tarefas.filter(t => t.feita).length;
+  if (!(await ask({ title: `Apagar ${n} tarefa(s) concluída(s)?`, ok: 'Apagar', danger: true }))) return;
+  db.tarefas = db.tarefas.filter(t => !t.feita); await commit('Concluídas apagadas.');
+};
+function vTarefas() {
+  const abertas = tarefasAbertas(), feitas = db.tarefas.filter(t => t.feita).sort((a, b) => (b.feitaEm || '').localeCompare(a.feitaEm || ''));
+  const linha = t => { const pc = t.pacienteId && P(t.pacienteId);
+    return `<tr><td style="width:34px"><input type="checkbox" data-act="toggle-task" data-id="${t.id}"${t.feita ? ' checked' : ''} aria-label="Concluir"></td>
+      <td${t.feita ? ' style="text-decoration:line-through;color:var(--muted)"' : ''}><b>${esc(t.titulo)}</b>${t.feita ? '' : prazoBadge(t)}${pc ? `<div class="muted"><a href="#/p/${pc.id}/dados">${esc(pc.nome)}</a></div>` : ''}${t.obs ? `<div class="muted pre">${esc(t.obs)}</div>` : ''}${t.feita && t.feitaEm ? `<div class="muted">concluída em ${fmtD(t.feitaEm.slice(0, 10))}</div>` : ''}</td>
+      <td class="acts">${menu([['edit-task', 'Editar', { id: t.id }], ['del-task', 'Excluir', { id: t.id }, 'danger']])}</td></tr>`; };
+  return `<div class="head"><h1>Tarefas</h1></div>
+    <form class="card" id="taskQuick" data-submit="add-task"><div class="toolbar" style="margin:0">
+      <label class="fld" style="flex:3 1 260px"><span>Nova tarefa</span><input name="titulo" placeholder="Ex.: enviar relatório para a escola do Pedro" autocomplete="off"></label>
+      <label class="fld" style="flex:0 1 160px"><span>Prazo (opcional)</span><input type="date" name="prazo"></label>
+      <label class="fld" style="flex:1 1 180px"><span>Paciente (opcional)</span><select name="pacienteId">${optsHTML([['', '—'], ...db.patients.filter(p => p.status !== 'inativo').sort((a, b) => a.nome.localeCompare(b.nome)).map(p => [p.id, p.nome])], '')}</select></label>
+      <button class="btn primary">Adicionar</button></div>
+      <p class="muted" style="margin:8px 0 0">As tarefas abertas aparecem em Pendências, na tela inicial. Marque a caixinha quando terminar.</p></form>
+    <div class="card"><h2>A fazer (${abertas.length})</h2>${abertas.length ? `<div class="tw"><table><tbody>${abertas.map(linha).join('')}</tbody></table></div>` : '<div class="empty">Nenhuma tarefa pendente. 🌿</div>'}</div>
+    ${feitas.length ? `<div class="card"><div class="head" style="margin-bottom:6px"><h2 style="margin:0">Concluídas (${feitas.length})</h2><button class="btn sm" data-act="clear-done">Apagar concluídas</button></div><div class="tw"><table><tbody>${feitas.slice(0, 30).map(linha).join('')}</tbody></table></div>${feitas.length > 30 ? `<p class="muted" style="margin:6px 0 0">Mostrando as 30 mais recentes.</p>` : ''}</div>` : ''}`;
+}
+
 /* responsáveis */
 const guardianFields = () => [
   { k: 'nome', l: 'Nome completo', req: true, w: 'full' },
@@ -2231,6 +2289,7 @@ function vDashboard() {
   const noGuard = active.filter(p => isMinor(p) && !p.responsaveis.length);
   const noContract = active.filter(p => !hasContract(p));
   const pend = [
+    ...(APP.tarefas ? tarefasAbertas().map(tarefaLi) : []),
     noContract.length && (noContract.length <= 3
       ? noContract.map(p => `<li><a href="#/p/${p.id}/dados">${esc(p.nome)}</a> está sem contrato anexado.</li>`).join('')
       : `<li><a href="#" data-act="show-nocontract">${noContract.length} pacientes ativos sem contrato anexado</a>.</li>`),
@@ -2535,7 +2594,8 @@ function render() {
   if (!db) return;
   const r = route();
   listRenderer = null;
-  const views = { inicio: vDashboard, pacientes: vPatients, p: vPatient, agenda: vAgenda, financeiro: vFinance, contatos: vContacts, config: vConfig };
+  const nt = $('#navTarefas'); if (nt) { nt.hidden = !APP.tarefas; const n = (db.tarefas || []).filter(t => !t.feita).length; nt.textContent = n ? `Tarefas (${n})` : 'Tarefas'; }
+  const views = { tarefas: APP.tarefas ? vTarefas : vDashboard, inicio: vDashboard, pacientes: vPatients, p: vPatient, agenda: vAgenda, financeiro: vFinance, contatos: vContacts, config: vConfig };
   const active = document.activeElement, focusKey = active?.dataset?.ui, selStart = active?.selectionStart;
   $('#main').innerHTML = (views[r.page] || vDashboard)(r);
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (r.page === 'p' ? 'pacientes' : r.page)));
