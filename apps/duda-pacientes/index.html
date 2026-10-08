@@ -2169,6 +2169,7 @@ function vDashboard() {
       <div class="row"><button class="btn sm primary" data-act="export-vault">Baixar backup agora</button><button class="btn sm" data-act="backup-later">Lembrar em 2 dias</button></div></div>` : ''}
   <div class="head"><div><h1>Olá${db.settings.nome ? ', ' + esc(db.settings.nome.split(' ')[0]) : ''}!</h1><div class="muted">${fmtDW(t)}</div></div>
     <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button><button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
+    <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<p class="muted" style="margin:0">Tudo em dia. 🌿</p>'}</div>
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
       ${(() => { if (!APP.contas || !db.contas.length) return ''; const ym = today().slice(0, 7);
@@ -2190,7 +2191,6 @@ function vDashboard() {
       <div>
         ${contasCard()}
         <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${(() => { const r = c.p.responsaveis.find(r => waLink(r.telefone)); return r ? `<a class="wa" href="${waLink(r.telefone)}" target="_blank" rel="noopener" title="WhatsApp de ${esc(r.nome)}">WhatsApp ${esc(r.nome.split(' ')[0])}</a>` : ''; })()}</td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
-        <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<div class="empty">Tudo em dia. 🌿</div>'}</div>
         ${reps.length ? `<div class="card"><h2>Repasses às plataformas</h2><div class="tw"><table><tbody>${reps.map(r => `<tr><td><b>${esc(r.pl.nome)}</b><div class="muted">${esc(MONTHS[Number(month.slice(5)) - 1])}: ${money(r.mes)} · ${esc(platRegra(r.pl))}</div></td>
           <td class="num">${r.saldo > 0.005 ? `<b style="color:var(--warn)">${money(r.saldo)}</b>` : '<span class="muted">em dia</span>'}</td><td class="acts">${r.saldo > 0.005 ? `<button class="btn sm" data-act="pay-plat" data-id="${r.pl.id}">Pagar</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
         ${owing.length ? `<div class="card"><h2>Saldos em aberto</h2><div class="tw"><table><tbody>${owing.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.bal)}</td><td class="acts"><button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
