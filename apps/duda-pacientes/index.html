@@ -2307,9 +2307,6 @@ function vDashboard() {
     <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button><button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
-      ${(() => { if (!APP.contas || !db.contas.length) return ''; const ym = today().slice(0, 7);
-        const ab = [...contasDoMes(ymAdd(ym, -1)), ...contasDoMes(ym)].filter(x => x.aberta), atras = ab.filter(x => x.dias < 0).length;
-        return `<div class="stat ${atras ? 'bad' : ab.length ? 'warn' : ''}"><b>${ab.length}</b><span>conta(s) a pagar${atras ? ` · ${atras} atrasada(s)` : ''}</span></div>`; })()}
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
       <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span></div>
       <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
