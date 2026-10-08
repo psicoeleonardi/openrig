@@ -279,7 +279,7 @@ const AUTOLOCK_MIN = 15;
 const NFSE_NACIONAL = 'https://www.nfse.gov.br/EmissorNacional';
 
 let db = null, key = null, salt = null;
-const ui = { pq: '', pstatus: 'ativo', agFrom: '', agTo: '', agStatus: '', finMonth: '' };
+const ui = { pq: '', pstatus: 'ativo', agFrom: '', agTo: '', agStatus: '', agLocal: '', finMonth: '' };
 
 /* ---------- utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -2484,7 +2484,10 @@ function vAgenda() {
   const t = today();
   if (!ui.agFrom) ui.agFrom = t;
   if (!ui.agTo) ui.agTo = addDays(t, 30);
-  const inRange = db.sessions.filter(s => s.data >= ui.agFrom && s.data <= ui.agTo);
+  const pls = db.settings.plataformas || [];
+  if (ui.agLocal && ui.agLocal !== 'sem' && !PLAT(ui.agLocal)) ui.agLocal = '';
+  const noLocal = s => !ui.agLocal || (ui.agLocal === 'sem' ? !platOf(s) : platOf(s) === ui.agLocal);
+  const inRange = db.sessions.filter(s => s.data >= ui.agFrom && s.data <= ui.agTo && noLocal(s));
   const list = inRange.filter(s => !ui.agStatus || s.status === ui.agStatus).sort(bySess);
   const days = [...new Set(list.map(s => s.data))];
   const c = st => inRange.filter(s => s.status === st).length;
@@ -2494,12 +2497,36 @@ function vAgenda() {
     <div class="card"><div class="toolbar">
       <label class="fld"><span>De</span><input type="date" data-ui="agFrom" value="${ui.agFrom}"></label>
       <label class="fld"><span>Até</span><input type="date" data-ui="agTo" value="${ui.agTo}"></label>
+      ${pls.length ? `<label class="fld"><span>Local</span><select data-ui="agLocal">${optsHTML([['', 'Todos'], ...pls.map(pl => [pl.id, pl.nome]), ['sem', 'Particular (sem plataforma)']], ui.agLocal)}</select></label>` : ''}
       <label class="fld"><span>Situação</span><select data-ui="agStatus">${optsHTML([['', 'Todas'], ...Object.entries(S_STATUS)], ui.agStatus)}</select></label>
     </div><div class="row">${preset('Hoje', t, t)}${preset('Próximos 7 dias', t, addDays(t, 7))}${preset('Próximos 30 dias', t, addDays(t, 30))}${preset('Este mês', m0, addDays(addMonths(m0, 1), -1))}${preset('Mês passado', mPrev, addDays(m0, -1))}</div></div>
     <div class="stats"><div class="stat"><b>${c('agendado')}</b><span>agendadas</span></div><div class="stat"><b>${c('realizado')}</b><span>realizadas</span></div><div class="stat"><b>${c('falta')}</b><span>faltas</span></div><div class="stat"><b>${c('cancelado')}</b><span>cancelamentos</span></div><div class="stat"><b>${c('reagendado')}</b><span>reagendamentos</span></div></div>
+    ${ui.agLocal && ui.agLocal !== 'sem' ? agLocalCard(PLAT(ui.agLocal), inRange) : ''}
     <div class="card">${days.length ? days.map(d => `<div class="day">${fmtDW(d)}${d === t ? ' ' + badge('hoje', 'acc') : ''}</div>${sessTable(list.filter(s => s.data === d))}`).join('') : '<div class="empty">Nenhuma sessão neste período.</div>'}</div>`;
 }
 actions['ag-range'] = ({ a, b }) => { ui.agFrom = a; ui.agTo = b; render(); };
+/* resumo dos atendimentos de uma plataforma no período, para enviar a quem indicou os pacientes */
+function agLocalTexto(pl, ss) {
+  const feitos = ss.filter(billable), por = new Map();
+  for (const x of feitos) { const nm = P(x.pacienteId)?.nome || 'Paciente'; por.set(nm, (por.get(nm) || 0) + 1); }
+  const faltas = feitos.filter(x => x.status !== 'realizado').length;
+  return [`Atendimentos - ${pl.nome}`, `Período: ${fmtD(ui.agFrom)} a ${fmtD(ui.agTo)}`, '',
+    `Total: ${feitos.length} atendimento${feitos.length === 1 ? '' : 's'}${faltas ? ` (${faltas} falta${faltas === 1 ? '' : 's'}/cancelamento${faltas === 1 ? '' : 's'} cobrado${faltas === 1 ? '' : 's'})` : ''}`,
+    ...[...por].sort((a, b) => a[0].localeCompare(b[0], 'pt-BR')).map(([nm, n]) => `- ${nm}: ${n}`),
+    '', `Repasse: ${money(sum(feitos, repasseOf))}`].join('\n');
+}
+function agLocalCard(pl, ss) {
+  const feitos = ss.filter(billable), txt = agLocalTexto(pl, ss);
+  return `<div class="card"><div class="head" style="margin-bottom:8px"><div><h2 style="margin:0">${esc(pl.nome)}: ${feitos.length} atendimento${feitos.length === 1 ? '' : 's'} feito${feitos.length === 1 ? '' : 's'}</h2>
+      <div class="muted">${fmtD(ui.agFrom)} a ${fmtD(ui.agTo)} · realizados e faltas/cancelamentos cobrados · repasse ${money(sum(feitos, repasseOf))}</div></div>
+      <div class="actions"><button class="btn sm" data-act="ag-copiar">Copiar resumo</button><a class="btn sm primary" href="https://wa.me/?text=${encodeURIComponent(txt)}" target="_blank" rel="noopener">Enviar pelo WhatsApp</a></div></div>
+    <div class="pre muted" style="font-size:.88rem">${esc(txt)}</div></div>`;
+}
+actions['ag-copiar'] = async () => {
+  const pl = PLAT(ui.agLocal); if (!pl) return;
+  const txt = agLocalTexto(pl, db.sessions.filter(s => s.data >= ui.agFrom && s.data <= ui.agTo && platOf(s) === pl.id));
+  try { await navigator.clipboard.writeText(txt); toast('Resumo copiado.'); } catch { notice('Copie o resumo abaixo', txt); }
+};
 
 function platCard(reps, repPagosMes, month) {
   const pend = db.patients.map(p => ({ p, n: semRepasse(p).filter(billable).length })).filter(x => x.n);
