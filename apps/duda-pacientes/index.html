@@ -267,7 +267,7 @@ const APP = {
     padrao: [
       { id: 'ctrecanto', nome: 'Recanto das Borboletas (repasse)', dia: 5, plataformaId: 'plrecanto' },
       { id: 'ctsameca', nome: 'Sameca (repasse)', dia: 10, plataformaId: 'plsameca' },
-      { id: 'ctsalario', nome: 'Salário', dia: 10 },
+      { id: 'ctsalario', nome: 'Salário', dia: 10, foraDoTotal: true },
       { id: 'ctinss', nome: 'INSS', dia: 10 },
       { id: 'ctcontadora', nome: 'Contadora', dia: 10 },
       { id: 'ctsimples', nome: 'Simples Nacional', dia: 20 },
@@ -452,6 +452,7 @@ function migrate(d) {
       d.contas.push(ct);
     }
   }
+  for (const c of d.contas) if (c.id === 'ctsalario' && c.foraDoTotal === undefined) c.foraDoTotal = true;  // salário fica com a profissional
   for (const p of d.patients) { p.responsaveis ||= []; p.series ||= []; p.docs ||= []; p.estudo ||= {}; p.plano ||= {}; p.plano.metas ||= []; }
   return d;
 }
@@ -521,7 +522,11 @@ function repasseResumo(month) {  // por plataforma: devido, pago, saldo e do mê
     const mes = sum(ss.filter(s => s.data.startsWith(month)), repasseOf);
     const pacientes = db.patients.filter(p => p.plataformaId === pl.id && p.status === 'ativo').length;
     const mesDinheiro = Math.round(sum(ss.filter(s => s.data.startsWith(month)), s => repasseOf(s) * (fd.get(s.id) || 0)) * 100) / 100;
-    return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, mesDinheiro, mesPix: Math.round((mes - mesDinheiro) * 100) / 100, pacientes, n: ss.length };
+    // a pagar, separado: repasse das sessões pagas em dinheiro menos o já pago em dinheiro; o resto, por Pix
+    const devDin = sum(ss, s => repasseOf(s) * (fd.get(s.id) || 0)), pagos = db.repassesPagos.filter(r => r.plataformaId === pl.id);
+    const pagoDin = sum(pagos.filter(r => /dinheiro/i.test(r.forma || '')), r => r.valor), pagoPix = pago - pagoDin;
+    const saldoDinheiro = Math.max(0, Math.round((devDin - pagoDin) * 100) / 100), saldoPix = Math.max(0, Math.round((devido - devDin - pagoPix) * 100) / 100);
+    return { pl, devido, pago, saldo: Math.round((devido - pago) * 100) / 100, mes, mesDinheiro, mesPix: Math.round((mes - mesDinheiro) * 100) / 100, saldoDinheiro, saldoPix, pacientes, n: ss.length };
   });
 }
 /* cobrança: por sessão (padrão) ou mensal (valor fixo por mês, qualquer que seja o número de sessões).
@@ -1430,20 +1435,26 @@ const CT = id => db.contas.find(c => c.id === id);
 function vencimento(c, ym) { const last = new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).getDate(); return `${ym}-${pad(Math.min(Math.max(1, num(c.dia) || 1), last))}`; }
 function contaMes(c, ym) {  // situação da conta no mês ym
   const venc = vencimento(c, ym), pl = c.plataformaId ? PLAT(c.plataformaId) : null, comp = ymAdd(ym, -1);
-  let previsto = num(c.valor) || 0, pago = null;
+  let previsto = num(c.valor) || 0, pago = null, parcial = 0, pagoDin = 0;
   if (pl) {
-    previsto = Math.round(sum(db.sessions.filter(s => platOf(s) === pl.id && billable(s) && s.data.startsWith(comp)), repasseOf) * 100) / 100;
+    const total = Math.round(sum(db.sessions.filter(s => platOf(s) === pl.id && billable(s) && s.data.startsWith(comp)), repasseOf) * 100) / 100;
     // pagamentos antigos, sem o mês dos atendimentos, contam para o mês anterior ao do pagamento
     const r = db.repassesPagos.filter(r => r.plataformaId === pl.id && (r.competencia || ymAdd((r.data || '').slice(0, 7), -1)) === comp);
-    if (r.length) pago = { data: r.map(x => x.data).sort().pop(), valor: sum(r, x => x.valor), repasse: true };
+    const pagoV = Math.round(sum(r, x => x.valor) * 100) / 100;
+    pagoDin = sum(r.filter(x => /dinheiro/i.test(x.forma || '')), x => x.valor);
+    if (r.length && pagoV >= total - 0.005) pago = { data: r.map(x => x.data).sort().pop(), valor: pagoV, repasse: true };
+    else if (r.length) parcial = pagoV;  // pago só em parte: continua aberta pelo que falta
+    previsto = pago ? total : Math.round((total - pagoV) * 100) / 100;
   } else {
     const r = db.contasPagas.find(x => x.contaId === c.id && x.mes === ym);
     if (r) pago = { data: r.data, valor: num(r.valor), id: r.id };
   }
   const dias = daysUntil(venc), semNada = pl && !pago && previsto < 0.005;
   let dinheiro = 0;
-  if (pl && previsto > 0 && (APP.repasseDinheiro || []).includes(pl.id)) { const r = repasseResumo(comp).find(x => x.pl.id === pl.id); dinheiro = r ? r.mesDinheiro : 0; }
-  return { c, ym, venc, dias, previsto, pago, pl, comp, semNada, aberta: !pago && !semNada, dinheiro };
+  if (pl && previsto > 0 && (APP.repasseDinheiro || []).includes(pl.id)) {  // quanto do que falta sai do dinheiro recebido
+    const r = repasseResumo(comp).find(x => x.pl.id === pl.id); dinheiro = r ? Math.max(0, Math.min(previsto, Math.round((r.mesDinheiro - (pago ? 0 : pagoDin)) * 100) / 100)) : 0;
+  }
+  return { c, ym, venc, dias, previsto, pago, parcial, pl, comp, semNada, aberta: !pago && !semNada, dinheiro };
 }
 function contaBadge(x) {
   if (x.pago) return badge(`paga ${fmtD(x.pago.data).slice(0, 5)}`, 'ok');
@@ -1460,6 +1471,7 @@ const contaFields = () => [
   { k: 'valor', l: 'Valor previsto (R$)', t: 'money', hint: 'Opcional. Se o valor muda todo mês, deixe em branco e informe ao pagar.' },
   { k: 'plataformaId', l: 'É o repasse de uma plataforma?', t: 'select', opts: [['', 'Não'], ...(db.settings.plataformas || []).map(pl => [pl.id, pl.nome])], hint: 'Se for, o valor é o repasse dos atendimentos do mês anterior, calculado sozinho.' },
   { k: 'ativa', l: 'Conta ativa (aparece todo mês)', t: 'checkbox' },
+  { k: 'foraDoTotal', l: 'Não somar no total de contas a pagar (dinheiro que fica com você, como o salário)', t: 'checkbox' },
   { k: 'obs', l: 'Observações', t: 'textarea', rows: 2, ph: 'Ex.: chave Pix, código de barras, login do portal…' },
 ];
 actions['new-conta'] = () => openForm({ title: 'Nova conta mensal', fields: contaFields(), values: { ativa: true, dia: 10 },
@@ -1474,7 +1486,7 @@ actions['del-conta'] = async ({ id }) => {
 actions['pay-conta'] = ({ id, ym }) => {
   const x = contaMes(CT(id), ym);
   openForm({ title: `Pagar ${x.c.nome}`, saveLabel: 'Registrar pagamento',
-    intro: `<p class="muted">Vencimento: ${fmtD(x.venc)}.${x.pl ? ` Repasse dos atendimentos de ${fmtMonth(x.comp)}: <b>${money(x.previsto)}</b>.` : ''}${x.c.obs ? `<br>${esc(x.c.obs)}` : ''}</p>`,
+    intro: `<p class="muted">Vencimento: ${fmtD(x.venc)} · referente a ${fmtMonth(x.comp)}.${x.pl ? ` Repasse dos atendimentos: <b>${money(x.previsto)}</b>.` : ''}${x.c.obs ? `<br>${esc(x.c.obs)}` : ''}</p>`,
     fields: [{ k: 'data', l: 'Data do pagamento', t: 'date', req: true }, { k: 'valor', l: 'Valor pago (R$)', t: 'money', req: true },
       { k: 'forma', l: 'Forma de pagamento', t: 'select', opts: PAY_FORMS }, { k: 'obs', l: 'Observações', w: 'full' }],
     values: { data: today(), valor: x.previsto || '', forma: 'Pix' },
@@ -1487,24 +1499,29 @@ actions['pay-conta'] = ({ id, ym }) => {
 };
 actions['unpay-conta'] = async ({ id, ym }) => {
   const x = contaMes(CT(id), ym);
-  if (!(await ask({ title: `Desfazer o pagamento de ${x.c.nome}?`, text: `${fmtMonth(ym)} · ${money(x.pago.valor)} em ${fmtD(x.pago.data)}.`, ok: 'Desfazer', danger: true }))) return;
+  if (!(await ask({ title: `Desfazer o pagamento de ${x.c.nome}?`, text: x.pago ? `${fmtMonth(ym)} · ${money(x.pago.valor)} em ${fmtD(x.pago.data)}.` : `${fmtMonth(ym)} · ${money(x.parcial)} pagos em parte.`, ok: 'Desfazer', danger: true }))) return;
   if (x.pl) db.repassesPagos = db.repassesPagos.filter(r => !(r.plataformaId === x.pl.id && (r.competencia || ymAdd((r.data || '').slice(0, 7), -1)) === x.comp));
   else db.contasPagas = db.contasPagas.filter(r => r.id !== x.pago.id);
   await commit('Pagamento desfeito.');
 };
 function contaRow(x, { mostrarMes = false } = {}) {
-  const val = x.pago ? money(x.pago.valor) : x.previsto ? money(x.previsto) : '<span class="muted">a informar</span>';
-  return `<tr><td><b>${esc(x.c.nome)}</b><div class="muted">dia ${num(x.c.dia)}${mostrarMes ? ' · ' + esc(fmtMonth(x.ym)) : ''}${x.pl ? ` · atendimentos de ${esc(MONTHS[Number(x.comp.slice(5)) - 1])}` : ''}</div></td>
-    <td class="num">${val}${x.dinheiro > 0.005 ? `<div class="muted">${money(x.dinheiro)} dinheiro · ${money(x.previsto - x.dinheiro)} Pix</div>` : ''}</td><td>${contaBadge(x)}</td>
-    <td class="acts">${x.aberta ? `<button class="btn sm" data-act="pay-conta" data-id="${x.c.id}" data-ym="${x.ym}">Pagar</button>` : ''}${x.pago ? menu([['unpay-conta', 'Desfazer pagamento', { id: x.c.id, ym: x.ym }, 'danger']]) : ''}</td></tr>`;
+  const val = x.pago ? money(x.pago.valor) : x.previsto ? money(x.previsto) + (x.parcial ? `<div class="muted" style="white-space:normal">falta (já pago ${money(x.parcial)})</div>` : '') : '<span class="muted">a informar</span>';
+  return `<tr><td><b>${esc(x.c.nome)}</b><div class="muted">dia ${num(x.c.dia)} · referente a ${esc(MONTHS[Number(x.comp.slice(5)) - 1])}${x.pl ? ' (atendimentos)' : ''}${x.c.foraDoTotal ? ' · fora do total' : ''}</div></td>
+    <td class="num">${val}${x.pl && !x.pago && x.previsto > 0.005 && (APP.repasseDinheiro || []).includes(x.pl.id) ? `<div class="muted" style="white-space:normal">${money(x.dinheiro)} dinheiro<br>${money(x.previsto - x.dinheiro)} Pix</div>` : ''}</td><td>${contaBadge(x)}</td>
+    <td class="acts">${x.aberta ? `<button class="btn sm" data-act="pay-conta" data-id="${x.c.id}" data-ym="${x.ym}">Pagar</button>` : ''}${x.pago || x.parcial ? menu([['unpay-conta', 'Desfazer pagamento', { id: x.c.id, ym: x.ym }, 'danger']]) : ''}</td></tr>`;
+}
+function totalContas() {  // em aberto: atrasadas do mês passado + as deste mês, sem as marcadas "fora do total"
+  const ym = today().slice(0, 7);
+  const ab = [...contasDoMes(ymAdd(ym, -1)), ...contasDoMes(ym)].filter(x => x.aberta && !x.c.foraDoTotal);
+  return { valor: sum(ab, x => x.previsto), aInformar: ab.filter(x => !x.previsto).length, atrasadas: ab.filter(x => x.dias < 0).length, n: ab.length, ref: ymAdd(ym, -1) };
 }
 function contasCard() {  // tela inicial: atrasadas do mês passado, as deste mês e, a partir do dia 25, as do próximo
   if (!APP.contas || !db.contas.length) return '';
   const ym = today().slice(0, 7), atras = contasDoMes(ymAdd(ym, -1)).filter(x => x.aberta), atual = contasDoMes(ym);
   const prox = Number(today().slice(8)) >= 25 ? contasDoMes(ymAdd(ym, 1)) : [];
-  const abertoMes = sum(atual.filter(x => x.aberta), x => x.previsto);
+  const abertoMes = sum(atual.filter(x => x.aberta && !x.c.foraDoTotal), x => x.previsto), fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome);
   return `<div class="card"><div class="head" style="margin-bottom:6px"><h2 style="margin:0">Contas do mês</h2><a class="muted" href="#/financeiro">ver todas</a></div>
-    <p class="muted" style="margin:0 0 6px">${atual.filter(x => x.aberta).length ? `Falta pagar em ${esc(MONTHS[Number(ym.slice(5)) - 1])}: <b>${money(abertoMes)}</b>${atual.some(x => x.aberta && !x.previsto) ? ' + valores a informar' : ''}` : 'Tudo pago neste mês.'}</p>
+    <p class="muted" style="margin:0 0 6px">${atual.filter(x => x.aberta).length ? `Vencem em ${esc(MONTHS[Number(ym.slice(5)) - 1])}, referentes a ${esc(MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1])}. Falta pagar: <b>${money(abertoMes)}</b>${atual.some(x => x.aberta && !x.previsto && !x.c.foraDoTotal) ? ' + valores a informar' : ''}${fora.length ? ` (sem ${esc(fora.join(', ').toLowerCase())})` : ''}` : 'Tudo pago neste mês.'}</p>
     <div class="tw"><table><tbody>${[...atras.map(x => contaRow(x, { mostrarMes: true })), ...atual.map(x => contaRow(x))].join('')}</tbody></table></div>
     ${prox.length ? `<h3 style="margin:12px 0 4px">Próximo mês · ${esc(fmtMonth(ymAdd(ym, 1)))}</h3><div class="tw"><table><tbody>${prox.map(x => contaRow(x)).join('')}</tbody></table></div>` : ''}</div>`;
 }
@@ -2308,14 +2325,19 @@ function vDashboard() {
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
-      <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span></div>
+      <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span>${(() => {  // etiquetas por forma de pagamento
+        const by = {}; db.payments.filter(x => x.data.startsWith(month)).forEach(x => { const f = x.forma || 'Outro'; by[f] = (by[f] || 0) + num(x.valor); });
+        const rank = f => ({ Pix: 0, Dinheiro: 1 })[f] ?? 2, ord = Object.entries(by).sort((a, b) => rank(a[0]) - rank(b[0]) || b[1] - a[1]);
+        return ord.length ? `<div class="row" style="gap:4px;margin-top:6px">${ord.map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''; })()}</div>
       <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
       ${(() => {  // um quadro por plataforma com valor em aberto
         const dev = reps.filter(r => r.saldo > 0.005);
-        if (dev.length) return dev.map(r => `<div class="stat warn"><b>${money(r.saldo)}</b><span>a pagar a ${esc(r.pl.nome)}</span></div>`).join('');
+        if (dev.length) return dev.map(r => `<div class="stat warn"><b>${money(r.saldo)}</b><span>a pagar a ${esc(r.pl.nome)}</span>${(APP.repasseDinheiro || []).includes(r.pl.id)
+          ? `<div class="row" style="gap:4px;margin-top:6px">${badge(`Dinheiro: ${money(r.saldoDinheiro)}`, 'info')}${badge(`Pix: ${money(r.saldoPix)}`, 'info')}</div>` : ''}</div>`).join('');
         return reps.some(r => r.pacientes || r.n) ? '<div class="stat"><b>R$ 0,00</b><span>repasses a pagar</span></div>' : '';
       })()}
-      <div class="stat ${contacts.some(c => c.dias < 0) ? 'bad' : contacts.length ? 'warn' : ''}"><b>${contacts.length}</b><span>contatos c/ responsáveis</span></div>
+      ${(() => { if (!APP.contas || !db.contas.length) return ''; const tc = totalContas();
+        return `<div class="stat ${tc.atrasadas ? 'bad' : tc.n ? 'warn' : ''}"><b>${money(tc.valor)}</b><span>contas a pagar (ref. ${MONTHS[Number(tc.ref.slice(5)) - 1]})${tc.aInformar ? ` + ${tc.aInformar} a informar` : ''}</span></div>`; })()}
     </div>
     ${stale.length ? `<div class="card"><h2>Atualize a situação destas sessões passadas</h2><p class="muted">Ainda estão como “agendado”. Marque se foram realizadas, faltas, cancelamentos ou reagendamentos.</p>${sessTable(stale)}</div>` : ''}
     <div class="cols">
