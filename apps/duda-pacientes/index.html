@@ -261,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  previsao: true,  // quadro com a previsão de ganhos e gastos do mês
   tarefas: true,  // aba Tarefas (as abertas aparecem em Pendências)
   repasseDinheiro: ['plrecanto'],  // plataformas com o repasse separado em Pix e dinheiro no Financeiro
   contas: {  // contas do mês (só nesta versão); as de plataforma pagam o repasse do mês anterior
@@ -1523,6 +1524,42 @@ function contasFinCard(month) {
     ${inativas.length ? `<p class="muted" style="margin:8px 0 0">Inativas: ${inativas.map(c => `<a href="#" data-act="edit-conta" data-id="${c.id}">${esc(c.nome)}</a>`).join(', ')}</p>` : ''}</div>`;
 }
 
+/* etiquetas de forma de pagamento (Pix e dinheiro primeiro), as mesmas no painel e no Financeiro */
+function formaTags(pays) {
+  const by = {}; pays.forEach(x => { const f = x.forma || 'Outro'; by[f] = (by[f] || 0) + num(x.valor); });
+  const rank = f => ({ Pix: 0, Dinheiro: 1 })[f] ?? 2, ord = Object.entries(by).sort((a, b) => rank(a[0]) - rank(b[0]) || b[1] - a[1]);
+  return ord.length ? `<div class="row" style="gap:4px;margin-top:6px">${ord.map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : '';
+}
+const dinPixTags = (din, pix) => `<div class="row" style="gap:4px;margin-top:6px">${badge(`Dinheiro: ${money(din)}`, 'info')}${badge(`Pix: ${money(pix)}`, 'info')}</div>`;
+function contasStat(ym) {  // total das contas do mês (sem as "fora do total", como o salário)
+  const l = contasDoMes(ym).filter(x => !x.c.foraDoTotal), ab = l.filter(x => x.aberta), n = ab.filter(x => !x.previsto).length;
+  return `<div class="stat ${ab.some(x => x.dias < 0) ? 'bad' : ab.length ? 'warn' : ''}"><b>${money(sum(ab, x => x.previsto))}</b><span>contas a pagar em ${MONTHS[Number(ym.slice(5)) - 1]} (ref. ${MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1]})${n ? ` + ${n} a informar` : ''}</span></div>`;
+}
+/* previsão do mês: o que entra (já cobrado + sessões agendadas) e o que sai (contas que vencem no mês) */
+function previsaoMes(ym) {
+  let cobrado = 0, agendado = 0;
+  for (const p of db.patients) {
+    const ss = sessOf(p.id).filter(s => s.data.startsWith(ym)), feitas = ss.filter(billable), ag = ss.filter(s => s.status === 'agendado');
+    if (mensalEm(p, ym)) { const v = num(cobrancaEm(p, ym).valor); if (feitas.length) cobrado += v; else if (ag.length) agendado += v; }
+    else { cobrado += sum(feitas, s => s.valor); agendado += sum(ag, s => s.valor); }
+  }
+  const recebido = sum(db.payments.filter(x => (x.data || '').startsWith(ym)), x => x.valor);
+  const cs = APP.contas ? contasDoMes(ym).filter(x => !x.c.foraDoTotal) : [];
+  const pago = sum(cs, x => x.pago ? x.pago.valor : x.parcial), aPagar = sum(cs.filter(x => x.aberta), x => x.previsto);
+  const fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome.toLowerCase());
+  return { cobrado, agendado, ganhos: cobrado + agendado, recebido, pago, aPagar, gastos: pago + aPagar, aInformar: cs.filter(x => x.aberta && !x.previsto).length, fora };
+}
+function previsaoCard(ym) {
+  if (!APP.previsao) return '';
+  const v = previsaoMes(ym), sobra = v.ganhos - v.gastos, mes = MONTHS[Number(ym.slice(5)) - 1], ant = MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1];
+  const linha = (rot, val, det, cor = '') => `<tr><td><b>${rot}</b><div class="muted" style="white-space:normal">${det}</div></td><td class="num"><b${cor ? ` style="color:var(--${cor})"` : ''}>${val}</b></td></tr>`;
+  return `<div class="card"><h2>Previsão de ${esc(mes)}</h2><div class="tw"><table><tbody>
+    ${linha('Ganhos previstos', money(v.ganhos), `${money(v.cobrado)} de sessões feitas + ${money(v.agendado)} de sessões agendadas · já recebido: ${money(v.recebido)}`, 'ok')}
+    ${APP.contas ? linha('Gastos previstos', money(v.gastos), `contas que vencem em ${esc(mes)} (ref. ${esc(ant)}) · já pago: ${money(v.pago)}${v.aInformar ? ` · ${v.aInformar} conta${v.aInformar === 1 ? '' : 's'} a informar` : ''}${v.fora.length ? ` · sem ${esc(v.fora.join(', '))}` : ''}`, 'bad') : ''}
+    ${APP.contas ? linha('Sobra prevista', money(sobra), v.aInformar ? 'antes das contas ainda sem valor' : 'ganhos menos gastos', sobra < 0 ? 'bad' : '') : ''}
+  </tbody></table></div></div>`;
+}
+
 /* tarefas: lista simples; as abertas aparecem em Pendências na tela inicial */
 const tarefasAbertas = () => (db.tarefas || []).filter(t => !t.feita).sort((a, b) => (a.prazo || '9999').localeCompare(b.prazo || '9999') || (a.criadaEm || '').localeCompare(b.criadaEm || ''));
 function prazoBadge(t) {
@@ -2312,15 +2349,12 @@ function vDashboard() {
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
-      <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span>${(() => {  // etiquetas por forma de pagamento
-        const by = {}; db.payments.filter(x => x.data.startsWith(month)).forEach(x => { const f = x.forma || 'Outro'; by[f] = (by[f] || 0) + num(x.valor); });
-        const rank = f => ({ Pix: 0, Dinheiro: 1 })[f] ?? 2, ord = Object.entries(by).sort((a, b) => rank(a[0]) - rank(b[0]) || b[1] - a[1]);
-        return ord.length ? `<div class="row" style="gap:4px;margin-top:6px">${ord.map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''; })()}</div>
+      <div class="stat"><b>${money(recMes)}</b><span>recebido em ${MONTHS[Number(month.slice(5)) - 1]}</span>${formaTags(db.payments.filter(x => x.data.startsWith(month)))}</div>
       <div class="stat ${owing.length ? 'warn' : ''}"><b>${money(sum(owing, x => x.bal))}</b><span>a receber</span></div>
       ${(() => {  // um quadro por plataforma com valor em aberto
         const dev = reps.filter(r => r.saldo > 0.005);
         if (dev.length) return dev.map(r => `<div class="stat warn"><b>${money(r.saldo)}</b><span>a pagar a ${esc(r.pl.nome)}</span>${(APP.repasseDinheiro || []).includes(r.pl.id)
-          ? `<div class="row" style="gap:4px;margin-top:6px">${badge(`Dinheiro: ${money(r.saldoDinheiro)}`, 'info')}${badge(`Pix: ${money(r.saldoPix)}`, 'info')}</div>` : ''}</div>`).join('');
+          ? dinPixTags(r.saldoDinheiro, r.saldoPix) : ''}</div>`).join('');
         return reps.some(r => r.pacientes || r.n) ? '<div class="stat"><b>R$ 0,00</b><span>repasses a pagar</span></div>' : '';
       })()}
       ${(() => { if (!APP.contas || !db.contas.length) return ''; const tc = totalContas();
@@ -2331,6 +2365,7 @@ function vDashboard() {
       <div class="card"><h2>Próximos 7 dias</h2>${sessTable(upcoming)}</div>
       <div>
         <div class="card"><h2>Pendências</h2>${pend.length ? `<ul style="margin:0;padding-left:18px">${pend.join('')}</ul>` : '<p class="muted" style="margin:0">Tudo em dia. 🌿</p>'}</div>
+        ${previsaoCard(month)}
         ${contasCard()}
         <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${(() => { const r = c.p.responsaveis.find(r => waLink(r.telefone)); return r ? `<a class="wa" href="${waLink(r.telefone)}" target="_blank" rel="noopener" title="WhatsApp de ${esc(r.nome)}">WhatsApp ${esc(r.nome.split(' ')[0])}</a>` : ''; })()}</td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
         ${reps.length ? `<div class="card"><h2>Repasses às plataformas</h2><div class="tw"><table><tbody>${reps.map(r => `<tr><td><b>${esc(r.pl.nome)}</b><div class="muted">${esc(MONTHS[Number(month.slice(5)) - 1])}: ${money(r.mes)} · ${esc(platRegra(r.pl))}</div></td>
@@ -2544,7 +2579,6 @@ function platCard(reps, repPagosMes, month) {
 function vFinance() {
   const month = ui.finMonth || today().slice(0, 7);
   const pays = db.payments.filter(x => x.data.startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
-  const byForm = {}; pays.forEach(x => { byForm[x.forma || 'Outro'] = (byForm[x.forma || 'Outro'] || 0) + num(x.valor); });
   const invs = db.invoices.filter(i => (i.dataEmissao || '').startsWith(month) || (!i.dataEmissao && i.competencia === month) || i.status === 'pendente').sort((a, b) => (b.dataEmissao || '').localeCompare(a.dataEmissao || ''));
   const billed = cobradoNoMes(month);
   const nfTotal = sum(db.invoices.filter(i => i.status === 'emitida' && (i.dataEmissao || '').startsWith(month)), i => i.valor);
@@ -2554,7 +2588,7 @@ function vFinance() {
   const repPagosMes = db.repassesPagos.filter(r => (r.data || '').startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
   return `<div class="head"><h1>Financeiro</h1><div class="actions">${nfLink()}<button class="btn" data-act="new-invoice">+ Nota fiscal</button><button class="btn primary" data-act="new-payment">+ Pagamento</button></div></div>
     <div class="card"><div class="toolbar"><label class="fld" style="flex:0 1 220px"><span>Mês</span><input type="month" data-ui="finMonth" value="${month}"></label></div>
-      <div class="stats" style="margin:0"><div class="stat"><b>${money(sum(pays, x => x.valor))}</b><span>recebido em ${fmtMonth(month)}</span></div>
+      <div class="stats" style="margin:0"><div class="stat"><b>${money(sum(pays, x => x.valor))}</b><span>recebido em ${fmtMonth(month)}</span>${formaTags(pays)}</div>
       <div class="stat"><b>${money(billed)}</b><span>sessões cobráveis no mês</span></div><div class="stat"><b>${money(nfTotal)}</b><span>em notas emitidas no mês</span></div>
       <div class="stat ${semNF.length ? 'warn' : ''}"><b>${semNF.length}</b><span>pagamentos sem NF (total)</span></div>
       ${(() => {  // repasse do mês separado por plataforma
@@ -2562,11 +2596,11 @@ function vFinance() {
         if (!ativas.length) return '';
         const mesNome = MONTHS[Number(month.slice(5)) - 1];
         return ativas.map(r => (APP.repasseDinheiro || []).includes(r.pl.id)
-            ? `<div class="stat"><b>${money(r.mesPix)}</b><span>repasse ${esc(r.pl.nome)} · Pix em ${mesNome}</span></div><div class="stat"><b>${money(r.mesDinheiro)}</b><span>repasse ${esc(r.pl.nome)} · dinheiro em ${mesNome}</span></div>`
+            ? `<div class="stat"><b>${money(r.mes)}</b><span>repasse ${esc(r.pl.nome)} em ${mesNome}</span>${dinPixTags(r.mesDinheiro, r.mesPix)}</div>`
             : `<div class="stat"><b>${money(r.mes)}</b><span>repasse ${esc(r.pl.nome)} em ${mesNome}</span></div>`).join('')
           + `<div class="stat"><b>${money(billed - repMes)}</b><span>líquido das sessões do mês (após ${ativas.length > 1 ? `${money(repMes)} de repasses` : 'repasses'})</span></div>`;
-      })()}</div>
-      ${Object.keys(byForm).length ? `<div class="row" style="margin-top:12px">${Object.entries(byForm).map(([f, v]) => badge(`${f}: ${money(v)}`, 'info')).join('')}</div>` : ''}</div>
+      })()}${APP.contas && db.contas.length ? contasStat(month) : ''}</div></div>
+    ${previsaoCard(month)}
     ${contasFinCard(month)}
     ${platCard(reps, repPagosMes, month)}
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
