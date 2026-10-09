@@ -261,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  casal: true,  // cadastro de atendimento de casal (duas pessoas)
   previsao: true,  // quadro com a previsão de ganhos e gastos do mês
   tarefas: true,  // aba Tarefas (as abertas aparecem em Pendências)
   repasseDinheiro: ['plrecanto'],  // plataformas com o repasse separado em Pix e dinheiro no Financeiro
@@ -318,7 +319,11 @@ function age(n) {
   if (m < 0 || (m === 0 && t.getDate() < b.getDate())) a--;
   return a;
 }
-const isMinor = p => { const a = age(p.nasc); return a !== null && a < 18; };
+const isCasal = p => p?.tipo === 'casal';
+const isMinor = p => { if (isCasal(p)) return false; const a = age(p.nasc); return a !== null && a < 18; };
+/* casal: pessoa 1 usa os campos de sempre (nome1, nasc, cpf, telefone…); pessoa 2, os mesmos com "2" no fim */
+const pessoa = (p, n) => n === 2 ? { nome: p.nome2, cpf: p.cpf2, email: p.email2, telefone: p.telefone2, endereco: p.endereco } : { nome: p.nome1 || p.nome, cpf: p.cpf, email: p.email, telefone: p.telefone, endereco: p.endereco };
+const primeiro = n => String(n || '').trim().split(/\s+/)[0] || '';
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2200); }
 async function download(name, text, type = 'application/json') {
   if (dlCap) {
@@ -567,6 +572,7 @@ function contactInfo(p) {
 }
 const needsContact = p => p.status === 'ativo' && isMinor(p);
 function payer(p) {
+  if (isCasal(p)) return pessoa(p, p.pagador === '2' ? 2 : 1);
   if (isMinor(p) && p.responsaveis.length) { const r = financeiro(p); return { nome: r.nome, cpf: r.cpf, endereco: r.endereco || p.endereco, email: r.email }; }
   return { nome: p.nome, cpf: p.cpf, endereco: p.endereco, email: p.email };
 }
@@ -1181,7 +1187,9 @@ actions.lock = () => showLock();
 function patientFields() {
   return [
     { t: 'section', l: 'Identificação' },
+    ...(APP.casal ? [{ k: 'tipo', l: 'Tipo de atendimento', t: 'select', opts: [['', 'Individual'], ['casal', 'Casal']] }] : []),
     { k: 'nome', l: 'Nome completo', req: true, w: 'full' },
+    ...(APP.casal ? [{ t: 'section', l: 'Pessoa 1' }, { k: 'nome1', l: 'Nome completo', w: 'full' }] : []),
     { k: 'nomeSocial', l: 'Nome social / como prefere ser chamado(a)' },
     { k: 'nasc', l: 'Data de nascimento', t: 'date', hint: 'Menores de 18 anos ganham campos de responsáveis e lembrete mensal de contato.' },
     { k: 'cpf', l: 'CPF' }, { k: 'rg', l: 'RG' },
@@ -1189,6 +1197,10 @@ function patientFields() {
     { k: 'email', l: 'E-mail', t: 'email' }, { k: 'ocupacao', l: 'Escola / série ou ocupação' },
     { k: 'endereco', l: 'Endereço', w: 'full' },
     { k: 'emergencia', l: 'Contato de emergência', w: 'full' },
+    ...(APP.casal ? [{ t: 'section', l: 'Pessoa 2' }, { k: 'nome2', l: 'Nome completo', w: 'full' },
+      { k: 'nasc2', l: 'Data de nascimento', t: 'date' }, { k: 'cpf2', l: 'CPF' }, { k: 'rg2', l: 'RG' }, { k: 'genero2', l: 'Gênero' },
+      { k: 'telefone2', l: 'Telefone / WhatsApp', t: 'tel', ph: '(11) 98888-7777' }, { k: 'email2', l: 'E-mail', t: 'email' }, { k: 'ocupacao2', l: 'Ocupação' },
+      { k: 'pagador', l: 'Quem paga / em nome de quem sai o recibo e a NF', t: 'select', w: 'full', opts: [['1', 'Pessoa 1'], ['2', 'Pessoa 2'], ['dividido', 'Dividem (cada um paga a sua parte)']] }] : []),
     { t: 'section', l: 'Atendimento' },
     { k: 'inicio', l: 'Início do acompanhamento', t: 'date' },
     { k: 'status', l: 'Situação', t: 'select', opts: Object.entries(P_STATUS) },
@@ -1210,7 +1222,29 @@ function patientFields() {
     { k: 'obs', l: 'Observações gerais', t: 'textarea', rows: 3 },
   ];
 }
+function casalFormUI(form) {  // casal: mostra pessoa 1 e 2; individual: esconde
+  if (!form.tipo) return;
+  const secs = [...form.querySelectorAll('h3.sec')], sec = t => secs.find(h => h.textContent === t);
+  const so2 = ['nome1', 'nome2', 'nasc2', 'cpf2', 'rg2', 'genero2', 'telefone2', 'email2', 'ocupacao2', 'pagador'];
+  const nomeLab = form.nome.closest('.fld').querySelector('span'), ocLab = form.ocupacao.closest('.fld').querySelector('span'), hint = form.nasc.closest('.fld').querySelector('small');
+  const sync = () => { const c = form.tipo.value === 'casal';
+    so2.forEach(k => { form[k].closest('.fld').hidden = !c; }); sec('Pessoa 1').hidden = sec('Pessoa 2').hidden = !c;
+    form.nome.required = !c; form.nome1.required = form.nome2.required = c;
+    nomeLab.textContent = c ? 'Nome do casal (como aparece na lista)' : 'Nome completo *';
+    form.nome.placeholder = c ? 'Em branco: “Ana e João”' : '';
+    form.nomeSocial.closest('.fld').hidden = c; ocLab.textContent = c ? 'Ocupação' : 'Escola / série ou ocupação';
+    if (hint) hint.hidden = c;
+    form.endereco.closest('.fld').querySelector('span').textContent = c ? 'Endereço (do casal)' : 'Endereço';
+    form.emergencia.closest('.fld').querySelector('span').textContent = c ? 'Contato de emergência (do casal)' : 'Contato de emergência';
+};
+  form.tipo.addEventListener('change', sync); sync();
+}
+function casalSave(v) {  // nome do casal automático; individual não guarda dados de casal
+  if (v.tipo !== 'casal') { if ('tipo' in v) for (const k of ['nome1', 'nome2', 'nasc2', 'cpf2', 'rg2', 'genero2', 'telefone2', 'email2', 'ocupacao2', 'pagador']) v[k] = ''; return; }
+  if (!String(v.nome || '').trim()) v.nome = `${primeiro(v.nome1)} e ${primeiro(v.nome2)}`;
+}
 function patientFormUI(form) {  // o repasse diferente só aparece se houver plataforma e a caixa for marcada
+  casalFormUI(form);
   const chk = form.querySelector('[name=repasseDif]'), row = form.repasse.closest('.fld'), chkRow = chk.closest('.check');
   const sync = () => { const pl = !!form.plataformaId.value; chkRow.hidden = !pl; row.hidden = !(pl && chk.checked); };
   form.plataformaId.addEventListener('change', sync); chk.addEventListener('change', sync); sync();
@@ -1228,7 +1262,7 @@ actions['new-patient'] = () => openForm({
   values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true, cobranca: 'sessao', mensalDesde: today().slice(0, 7) },
   onSave: async v => {
     if (v.cobranca === 'mensal' && !num(v.mensalidade)) { notice('Informe o valor por mês.'); return false; }
-    cleanRepasse(v);
+    cleanRepasse(v); casalSave(v);
     const cob = { cobranca: v.cobranca, mensalidade: v.mensalidade, mensalDesde: v.mensalDesde || (v.inicio || today()).slice(0, 7) };
     delete v.cobranca; delete v.mensalidade; delete v.mensalDesde;
     v.linkChamada = normUrl(v.linkChamada);
@@ -1243,7 +1277,7 @@ actions['edit-patient'] = ({ id }) => {
   const p = P(id);
   openForm({ title: 'Editar paciente', fields: patientFields(), values: { ...p, repasseDif: hasVal(p.repasse), ...cobrancaValues(p) }, onRender: patientFormUI, onSave: async v => {
     if (v.cobranca === 'mensal' && !num(v.mensalidade)) { notice('Informe o valor por mês.'); return false; }
-    cleanRepasse(v);
+    cleanRepasse(v); casalSave(v);
     const mudouCobranca = aplicarCobranca(p, v);
     const antes = { status: p.status, valor: p.valor, plataformaId: p.plataformaId || '' };
     p.series ||= [];
@@ -1826,11 +1860,21 @@ function suggestReference(pid) {
   const ref = [men.length ? `Mensalidade de ${men.join(', ')}` : '', ses.length ? `Sessões de ${ses.join(', ')}` : ''].filter(Boolean).join(' · ');
   return { valor: Math.round(bal.bal * 100) / 100, referencia: ref };
 }
+/* casal: botões para preencher quem pagou (ou quem recebe a nota) com os dados da pessoa 1 ou 2 */
+function casalPicker(p, campos) {
+  if (!isCasal(p)) return { intro: '', onRender: undefined };
+  const ps = [1, 2].map(n => pessoa(p, n)).filter(x => x.nome);
+  return { intro: `<div class="row" style="margin-bottom:10px"><span class="muted">${campos.rot}:</span>${ps.map((x, i) => `<button type="button" class="btn sm" data-pessoa="${i}">${esc(x.nome)}</button>`).join('')}</div>`,
+    onRender: form => form.querySelectorAll('[data-pessoa]').forEach(b => b.addEventListener('click', () => { const x = ps[+b.dataset.pessoa];
+      for (const [k, f] of Object.entries(campos.map)) if (form[k]) form[k].value = x[f] || ''; })) };
+}
 function newPayment(pid) {
   const p = P(pid), pay = payer(p), sug = suggestReference(pid);
-  openForm({ title: `Pagamento — ${p.nome}`, fields: paymentFields(),
+  if (isCasal(p) && p.pagador === 'dividido' && sug.valor) sug.valor = Math.round(sug.valor * 50) / 100;  // cada um paga a sua metade
+  const pk = casalPicker(p, { rot: 'Quem pagou', map: { pagador: 'nome', pagadorCpf: 'cpf' } });
+  openForm({ title: `Pagamento — ${p.nome}`, fields: paymentFields(), onRender: pk.onRender,
     values: { data: today(), forma: 'Pix', pagador: pay.nome, pagadorCpf: pay.cpf, ...sug },
-    intro: sug.valor ? `<div class="alert info">Saldo em aberto: <b>${money(sug.valor)}</b>. Valor e referência foram sugeridos.</div>` : '',
+    intro: pk.intro + (sug.valor ? `<div class="alert info">${isCasal(p) && p.pagador === 'dividido' ? `O casal divide: sugerida a metade do saldo (${money(sug.valor)}). Registre um pagamento de cada pessoa.` : `Saldo em aberto: <b>${money(sug.valor)}</b>. Valor e referência foram sugeridos.`}</div>` : ''),
     onSave: async v => { if (!v.valor) { notice('Informe o valor.'); return false; } db.payments.push({ id: uid(), pacienteId: pid, ...v }); await commit('Pagamento registrado.'); } });
 }
 actions['new-payment'] = ({ pid }) => pid ? newPayment(pid) : pickPatient('Registrar pagamento', newPayment);
@@ -1844,7 +1888,7 @@ actions['del-payment'] = async ({ id }) => {
 };
 actions.receipt = ({ id }) => {
   const x = PAY(id), p = P(x.pacienteId), s = db.settings;
-  const benef = x.pagador && x.pagador !== p.nome ? `, referente a atendimento psicológico prestado a <b>${esc(p.nome)}</b>${p.cpf ? ` (CPF ${esc(p.cpf)})` : ''}` : ', referente a atendimento psicológico';
+  const benef = x.pagador && x.pagador !== p.nome ? `, referente a atendimento psicológico ${isCasal(p) ? 'de casal ' : ''}prestado a <b>${esc(p.nome)}</b>${p.cpf && !isCasal(p) ? ` (CPF ${esc(p.cpf)})` : ''}` : ', referente a atendimento psicológico';
   printDoc(`${profHeader()}<h1 style="text-align:center">RECIBO</h1><p style="text-align:right"><b>${money(x.valor)}</b></p>
     <p>Recebi de <b>${esc(x.pagador || p.nome)}</b>${x.pagadorCpf ? `, CPF ${esc(x.pagadorCpf)}` : ''}, a importância de <b>${money(x.valor)}</b> (${esc(extenso(x.valor))})${benef}${x.referencia ? ` — ${esc(x.referencia)}` : ''}, pago via ${esc(x.forma || '—')} em ${fmtD(x.data)}.</p>
     <p>Para clareza, firmo o presente.</p><p>${esc(s.cidade || '')}${s.cidade ? ', ' : ''}${fmtD(today())}.</p>
@@ -1874,9 +1918,12 @@ function saveInvoice(p, inv, v) {
   Object.assign(inv, v);
 }
 function newInvoice(pid, payId) {
-  const p = P(pid), pay = payer(p), first = payId ? PAY(payId) : null;
+  const p = P(pid), first = payId ? PAY(payId) : null;
+  // casal: a nota sai em nome de quem fez o pagamento (se for uma das duas pessoas)
+  const pay = isCasal(p) && first ? ([1, 2].map(n => pessoa(p, n)).find(x => x.nome && x.nome === first.pagador) || payer(p)) : payer(p);
   const comp = (first?.data || today()).slice(0, 7);
-  openForm({ title: `Nota fiscal — ${p.nome}`, fields: invoiceFields(p),
+  const pk = casalPicker(p, { rot: 'Nota em nome de', map: { tomadorNome: 'nome', tomadorCpf: 'cpf', tomadorEmail: 'email', tomadorEndereco: 'endereco' } });
+  openForm({ title: `Nota fiscal — ${p.nome}`, fields: invoiceFields(p), intro: pk.intro, onRender: pk.onRender,
     values: { status: 'pendente', competencia: comp, pagamentos: payId ? [payId] : [], tomadorNome: pay.nome, tomadorCpf: pay.cpf, tomadorEmail: pay.email, tomadorEndereco: pay.endereco,
       descricao: `${db.settings.descricaoNF}${pay.nome !== p.nome ? ` prestados a ${p.nome}` : ''}, referente a ${fmtMonth(comp)}.` },
     onSave: async v => { const inv = { id: uid(), pacienteId: pid }; saveInvoice(p, inv, v); db.invoices.push(inv); await commit(v.status === 'emitida' ? 'Nota registrada.' : 'Nota salva como “a emitir”.'); } });
@@ -2191,7 +2238,7 @@ function evTitle(p) {
   return `${st.gcalPrefixo || 'Sessão'} — ${who}`;
 }
 function inviteEmails(p) {
-  const all = [p.email, ...(isMinor(p) ? p.responsaveis.map(r => r.email) : [])].map(x => String(x || '').trim()).filter(x => /\S+@\S+\.\S+/.test(x));
+  const all = [p.email, ...(isCasal(p) ? [p.email2] : []), ...(isMinor(p) ? p.responsaveis.map(r => r.email) : [])].map(x => String(x || '').trim()).filter(x => /\S+@\S+\.\S+/.test(x));
   return [...new Set(all)];
 }
 function gcalUrl(p, { data, hora, duracao, intervalo, link }) {
@@ -2213,6 +2260,7 @@ function gcalUrl(p, { data, hora, duracao, intervalo, link }) {
 }
 function waTarget(p) {  // menor: responsável (financeiro primeiro); adulto: o próprio paciente
   if (isMinor(p)) { const r = [financeiro(p), ...p.responsaveis].find(r => r && waLink(r.telefone)); if (r) return { url: waLink(r.telefone), nome: r.nome.split(' ')[0], resp: true }; }
+  if (isCasal(p)) { const pe = [pessoa(p, p.pagador === '2' ? 2 : 1), pessoa(p, p.pagador === '2' ? 1 : 2)].find(x => waLink(x.telefone)); return pe ? { url: waLink(pe.telefone), nome: primeiro(pe.nome), resp: false } : null; }
   if (waLink(p.telefone)) return { url: waLink(p.telefone), nome: (p.nomeSocial || p.nome).split(' ')[0], resp: false };
   return null;
 }
@@ -2389,8 +2437,8 @@ function vPatients() {
     return `<div class="tw"><table><thead><tr><th>Nome</th><th>Idade</th><th>Contato</th><th>Próxima sessão</th><th class="num">Saldo</th><th>Situação</th></tr></thead><tbody>${list.map(p => {
       const a = age(p.nasc), ns = nextSession(p.id), b = balance(p.id);
       return `<tr><td><a href="#/p/${p.id}/dados"><b>${esc(p.nome)}</b></a>${p.nomeSocial ? `<div class="muted">${esc(p.nomeSocial)}</div>` : ''}</td>
-        <td>${a ?? '—'}${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>
-        <td>${isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${phoneHTML(p.responsaveis[0].telefone)}</div>` : phoneHTML(p.telefone)}</td>
+        <td>${isCasal(p) ? badge('casal', 'acc') : `${a ?? '—'}${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}`}</td>
+        <td>${isCasal(p) ? [[p.nome1, p.telefone], [p.nome2, p.telefone2]].filter(x => x[1]).map(([n, t]) => `<div>${esc(primeiro(n))}: ${phoneHTML(t)}</div>`).join('') : isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${phoneHTML(p.responsaveis[0].telefone)}</div>` : phoneHTML(p.telefone)}</td>
         <td>${ns ? `${fmtDW(ns.data)} <span class="muted">${esc(ns.hora || '')}</span>` : '<span class="muted">—</span>'}</td>
         <td class="num">${b.bal > 0.005 ? `<span style="color:var(--warn)">${money(b.bal)}</span>` : b.bal < -0.005 ? `<span class="muted">crédito ${money(-b.bal)}</span>` : '<span class="muted">em dia</span>'}</td>
         <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}${p.status === 'ativo' && !hasContract(p) ? ' ' + badge('sem contrato', 'warn') : ''}</td></tr>`;
@@ -2411,29 +2459,35 @@ function vPatient({ id, tab = 'dados' }) {
   const tabs = [['dados', 'Dados'], ['atendimentos', 'Atendimentos'], ['financeiro', 'Pagamentos e NF'], (minor || p.responsaveis.length) && ['contatos', 'Contatos c/ responsáveis'], ['prontuario', 'Prontuário'], ['estudo', 'Estudo de caso'], ['plano', 'Plano de tratamento']].filter(Boolean);
   const body = { dados: tDados, atendimentos: tAtend, financeiro: tFin, contatos: tContatos, prontuario: tPront, estudo: tEstudo, plano: tPlano }[tab] || tDados;
   return `<div class="head"><div><div class="muted"><a href="#/pacientes">← Pacientes</a></div><h1>${esc(p.nome)}</h1>
-      <div class="row">${a !== null ? `<span class="muted">${a} anos</span>` : ''}${minor ? badge('menor de idade', 'acc') : ''}${badge(P_STATUS[p.status], p.status === 'ativo' ? 'ok' : 'warn')}${p.modalidade ? badge(p.modalidade) : ''}</div></div>
+      <div class="row">${isCasal(p) ? badge('casal', 'acc') : a !== null ? `<span class="muted">${a} anos</span>` : ''}${minor ? badge('menor de idade', 'acc') : ''}${badge(P_STATUS[p.status], p.status === 'ativo' ? 'ok' : 'warn')}${p.modalidade ? badge(p.modalidade) : ''}</div></div>
     <div class="actions"><button class="btn" data-act="new-session" data-pid="${p.id}">+ Agendar</button><button class="btn" data-act="new-record" data-pid="${p.id}">+ Prontuário</button>${menu([['edit-patient', 'Editar dados', { id: p.id }], ['new-payment', 'Registrar pagamento', { pid: p.id }], ['del-patient', 'Excluir paciente', { id: p.id }, 'danger']])}</div></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/p/${p.id}/${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>
     ${body(p)}`;
 }
 function tDados(p) {
   const kv = (l, v) => v ? `<dt>${l}</dt><dd>${v}</dd>` : '';
-  const minor = isMinor(p);
-  return `<div class="cols">
-    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
+  const minor = isMinor(p), casal = isCasal(p);
+  const pcard = (tit, x) => `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">${tit}</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
+      <dl class="kv">${kv('Nome', esc(x.nome))}${kv('Nascimento', x.nasc ? `${fmtD(x.nasc)} (${age(x.nasc)} anos)` : '')}${kv('CPF', esc(x.cpf))}${kv('RG', esc(x.rg))}${kv('Gênero', esc(x.genero))}
+      ${kv('Telefone', phoneHTML(x.telefone))}${kv('E-mail', esc(x.email))}${kv('Ocupação', esc(x.ocupacao))}${x.pag ? kv('Pagamento', x.pag) : ''}</dl></div>`;
+  const pagTxt = n => p.pagador === 'dividido' ? 'divide com a outra pessoa' : (p.pagador || '1') === String(n) ? badge('paga · recibo e NF', 'ok') : '';
+  return `${casal ? `<div class="cols" style="margin-bottom:16px">${pcard('Pessoa 1', { nome: p.nome1, nasc: p.nasc, cpf: p.cpf, rg: p.rg, genero: p.genero, telefone: p.telefone, email: p.email, ocupacao: p.ocupacao, pag: pagTxt(1) })}
+      ${pcard('Pessoa 2', { nome: p.nome2, nasc: p.nasc2, cpf: p.cpf2, rg: p.rg2, genero: p.genero2, telefone: p.telefone2, email: p.email2, ocupacao: p.ocupacao2, pag: pagTxt(2) })}</div>` : ''}
+  <div class="cols">
+    ${casal ? `<div class="card"><h2>Casal</h2><dl class="kv">${kv('Nome na lista', esc(p.nome))}${kv('Endereço', esc(p.endereco))}${kv('Emergência', esc(p.emergencia))}</dl></div>` : `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Paciente</h2><button class="btn sm" data-act="edit-patient" data-id="${p.id}">Editar</button></div>
       <dl class="kv">${kv('Nome', esc(p.nome))}${kv('Nome social', esc(p.nomeSocial))}${kv('Nascimento', p.nasc ? `${fmtD(p.nasc)} (${age(p.nasc)} anos)` : '')}${kv('CPF', esc(p.cpf))}${kv('RG', esc(p.rg))}${kv('Gênero', esc(p.genero))}
-      ${kv('Telefone', phoneHTML(p.telefone))}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>
+      ${kv('Telefone', phoneHTML(p.telefone))}${kv('E-mail', esc(p.email))}${kv('Endereço', esc(p.endereco))}${kv('Escola / ocupação', esc(p.ocupacao))}${kv('Emergência', esc(p.emergencia))}</dl></div>`}
     <div class="card"><h2>Atendimento</h2><dl class="kv">${kv('Início', fmtD(p.inicio))}${kv('Situação', P_STATUS[p.status])}${mensalEm(p, today().slice(0, 7)) ? kv('Cobrança', `<b>${cobrancaTxt(p)}</b>${p.valor !== '' && p.valor != null ? ` <span class="muted">(referência por sessão para repasse: ${money(p.valor)})</span>` : ''}`) : kv('Valor da sessão', p.valor !== '' && p.valor != null ? money(p.valor) : '')}${kv('Frequência', esc(p.frequencia))}${kv('Horário fixo', p.series.filter(sr => sr.ativa).map(sr => esc(serieResumo(sr))).join('<br>'))}${kv('Dia / horário', esc(p.diaHorario))}${kv('Modalidade', esc(p.modalidade))}${kv('Encaminhamento', esc(p.encaminhadoPor))}${kv('Convênio', esc(p.convenio))}${(() => { const pl = PLAT(p.plataformaId); return pl ? kv('Plataforma', `${esc(pl.nome)} · repasse ${hasVal(p.repasse) ? money(p.repasse) + ' por atendimento' : platRegra(pl)}`) : ''; })()}${kv('Faltas', p.cobrarFalta ? 'cobradas por padrão' : 'não cobradas por padrão')}</dl>
       ${p.obs ? `<p class="pre" style="margin-bottom:0">${esc(p.obs)}</p>` : ''}</div>
   </div>
   ${onlineCard(p)}
   ${docsCard(p)}
-  <div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Responsáveis ${minor ? '' : '<span class="muted">(opcional para maiores de idade)</span>'}</h2><button class="btn sm primary" data-act="new-guardian" data-pid="${p.id}">+ Responsável</button></div>
+  ${casal ? '' : `<div class="card" style="margin-top:16px"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Responsáveis ${minor ? '' : '<span class="muted">(opcional para maiores de idade)</span>'}</h2><button class="btn sm primary" data-act="new-guardian" data-pid="${p.id}">+ Responsável</button></div>
     ${minor && !p.responsaveis.length ? '<div class="alert">Paciente menor de idade: cadastre pelo menos um responsável legal.</div>' : ''}
     <div class="cols">${p.responsaveis.map(r => `<div class="gcard"><div class="row" style="justify-content:space-between"><b>${esc(r.nome)}</b>${menu([['edit-guardian', 'Editar', { pid: p.id, id: r.id }], ['del-guardian', 'Remover', { pid: p.id, id: r.id }, 'danger']])}</div>
       <div class="row" style="margin:4px 0">${badge(r.parentesco || 'responsável')}${r.financeiro ? badge('financeiro', 'ok') : ''}${r.guarda ? badge('guarda / autoriza', 'info') : ''}</div>
       <dl class="kv">${kv('CPF', esc(r.cpf))}${kv('RG', esc(r.rg))}${kv('Telefone', phoneHTML(r.telefone))}${kv('E-mail', esc(r.email))}${kv('Profissão', esc(r.profissao))}${kv('Endereço', esc(r.endereco))}</dl>
-      ${r.obs ? `<div class="muted pre">${esc(r.obs)}</div>` : ''}</div>`).join('') || (minor ? '' : '<div class="empty">Nenhum responsável cadastrado.</div>')}</div></div>`;
+      ${r.obs ? `<div class="muted pre">${esc(r.obs)}</div>` : ''}</div>`).join('') || (minor ? '' : '<div class="empty">Nenhum responsável cadastrado.</div>')}</div></div>`}`;
 }
 function onlineCard(p) {
   const emails = inviteEmails(p), link = p.linkChamada, wa = link ? waMsg(p, msgLink(p)) : '';
@@ -2480,6 +2534,7 @@ function tFin(p) {
     <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div>${payTable(pays, { showPat: false })}</div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
+      ${isCasal(p) ? `<p class="muted">Casal: ${p.pagador === 'dividido' ? 'cada pessoa paga a sua parte; a nota sai em nome de quem pagou' : `a nota sai em nome de ${esc(payer(p).nome || 'pessoa ' + (p.pagador || 1))}`}.</p>` : ''}
       ${isMinor(p) ? `<p class="muted">Paciente menor: a nota sai em nome do responsável financeiro (${esc(payer(p).nome || 'não definido')}).</p>` : ''}${invTable(invs, { showPat: false })}</div>`;
 }
 function tContatos(p) {
