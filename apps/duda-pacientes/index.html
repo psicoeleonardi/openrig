@@ -1535,33 +1535,31 @@ function contasStat(ym) {  // total das contas do mês (sem as "fora do total", 
   const l = contasDoMes(ym).filter(x => !x.c.foraDoTotal), ab = l.filter(x => x.aberta), n = ab.filter(x => !x.previsto).length;
   return `<div class="stat ${ab.some(x => x.dias < 0) ? 'bad' : ab.length ? 'warn' : ''}"><b>${money(sum(ab, x => x.previsto))}</b><span>contas a pagar em ${MONTHS[Number(ym.slice(5)) - 1]} (ref. ${MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1]})${n ? ` + ${n} a informar` : ''}</span></div>`;
 }
-/* previsão do mês: o que entra (já cobrado + sessões agendadas) e o que sai (contas que vencem no mês) */
+/* previsão do mês: ganhos (sessões feitas + agendadas até o fim do mês) − repasse dessas mesmas sessões
+   − contas do mês (sem salário e sem as de repasse, que já estão no repasse previsto) = sobra */
 function previsaoMes(ym) {
-  let cobrado = 0, agendado = 0;
+  let ganhos = 0;
   for (const p of db.patients) {
-    const ss = sessOf(p.id).filter(s => s.data.startsWith(ym)), feitas = ss.filter(billable), ag = ss.filter(s => s.status === 'agendado');
-    if (mensalEm(p, ym)) { const v = num(cobrancaEm(p, ym).valor); if (feitas.length) cobrado += v; else if (ag.length) agendado += v; }
-    else { cobrado += sum(feitas, s => s.valor); agendado += sum(ag, s => s.valor); }
+    const ss = sessOf(p.id).filter(s => s.data.startsWith(ym) && (billable(s) || s.status === 'agendado'));
+    ganhos += mensalEm(p, ym) ? (ss.length ? num(cobrancaEm(p, ym).valor) : 0) : sum(ss, s => s.valor);
   }
-  const recebido = sum(db.payments.filter(x => (x.data || '').startsWith(ym)), x => x.valor);
-  const cs = APP.contas ? contasDoMes(ym).filter(x => !x.c.foraDoTotal) : [];
-  const pago = sum(cs, x => x.pago ? x.pago.valor : x.parcial), aPagar = sum(cs.filter(x => x.aberta), x => x.previsto);
+  // repasse previsto: das sessões feitas e das que ainda vão acontecer no mês
+  const repDe = s => billable(s) ? repasseOf(s) : s.status !== 'agendado' || !platOf(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
+  const reps = (db.settings.plataformas || []).map(pl => ({ pl, v: sum(db.sessions.filter(s => s.data.startsWith(ym) && platOf(s) === pl.id), repDe) })).filter(r => r.v > 0.005);
+  const cs = APP.contas ? contasDoMes(ym).filter(x => !x.c.foraDoTotal && !x.pl) : [];
+  const contas = sum(cs, x => x.pago ? x.pago.valor : x.previsto);
   const fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome.toLowerCase());
-  // repasse das sessões do mês (feitas e agendadas), pago às plataformas no mês seguinte
-  const repAg = s => !platOf(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
-  const reps = (db.settings.plataformas || []).map(pl => ({ pl, v: sum(db.sessions.filter(s => s.data.startsWith(ym) && platOf(s) === pl.id), s => billable(s) ? repasseOf(s) : s.status === 'agendado' ? repAg(s) : 0) })).filter(r => r.v > 0.005);
-  return { cobrado, agendado, ganhos: cobrado + agendado, reps, repasse: sum(reps, r => r.v), recebido, pago, aPagar, gastos: pago + aPagar, aInformar: cs.filter(x => x.aberta && !x.previsto).length, fora };
+  return { ganhos, reps, repasse: sum(reps, r => r.v), contas, nContas: cs.length, aInformar: cs.filter(x => !x.pago && !x.previsto).length, fora };
 }
 function previsaoCard(ym) {
   if (!APP.previsao) return '';
-  const v = previsaoMes(ym), sobra = v.ganhos - v.gastos, mes = MONTHS[Number(ym.slice(5)) - 1], ant = MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1];
-  const linha = (rot, val, det, cor = '') => `<tr><td><b>${rot}</b><div class="muted" style="white-space:normal">${det}</div></td><td class="num"><b${cor ? ` style="color:var(--${cor})"` : ''}>${val}</b></td></tr>`;
+  const v = previsaoMes(ym), sobra = v.ganhos - v.repasse - v.contas, mes = MONTHS[Number(ym.slice(5)) - 1];
+  const linha = (rot, val, det, cor = '') => `<tr><td><b>${rot}</b>${det ? `<div class="muted" style="white-space:normal">${det}</div>` : ''}</td><td class="num"><b${cor ? ` style="color:var(--${cor})"` : ''}>${val}</b></td></tr>`;
   return `<div class="card"><h2>Previsão de ${esc(mes)}</h2><div class="tw"><table><tbody>
-    ${linha('Ganhos previstos', money(v.ganhos), `${money(v.cobrado)} de sessões feitas + ${money(v.agendado)} de sessões agendadas · já recebido: ${money(v.recebido)}`, 'ok')}
-    ${v.reps.length ? linha('Repasse previsto às plataformas', '− ' + money(v.repasse), `${v.reps.map(r => `${esc(r.pl.nome)}: ${money(r.v)}`).join(' · ')} · pago em ${esc(MONTHS[Number(ymAdd(ym, 1).slice(5)) - 1])}`, 'warn')
-      + linha('Ganho líquido previsto', money(v.ganhos - v.repasse), 'ganhos previstos menos o repasse das sessões do mês') : ''}
-    ${APP.contas ? linha('Gastos previstos', money(v.gastos), `contas que vencem em ${esc(mes)} (ref. ${esc(ant)}) · já pago: ${money(v.pago)}${v.aInformar ? ` · ${v.aInformar} conta${v.aInformar === 1 ? '' : 's'} a informar` : ''}${v.fora.length ? ` · sem ${esc(v.fora.join(', '))}` : ''}`, 'bad') : ''}
-    ${APP.contas ? linha('Sobra prevista', money(sobra), `ganhos menos as contas do mês${v.reps.length ? ` (o repasse de ${esc(mes)} entra nas contas de ${esc(MONTHS[Number(ymAdd(ym, 1).slice(5)) - 1])})` : ''}${v.aInformar ? ', antes das contas ainda sem valor' : ''}`, sobra < 0 ? 'bad' : '') : ''}
+    ${linha('Ganhos previstos', money(v.ganhos), `sessões de ${esc(mes)} já feitas e agendadas até o fim do mês`, 'ok')}
+    ${linha('Repasse previsto', '− ' + money(v.repasse), v.reps.length ? `${v.reps.map(r => `${esc(r.pl.nome)}: ${money(r.v)}`).join(' · ')} (sessões feitas e agendadas)` : 'nenhuma sessão de plataforma no mês', 'warn')}
+    ${APP.contas ? linha('Contas previstas', '− ' + money(v.contas), `contas que vencem em ${esc(mes)}${v.fora.length ? `, sem ${esc(v.fora.join(', '))}` : ''}${v.aInformar ? ` · ${v.aInformar} ainda sem valor` : ''}`, 'bad') : ''}
+    ${linha('Sobra prevista', money(sobra), v.aInformar ? 'falta informar o valor de algumas contas' : '', sobra < 0 ? 'bad' : '')}
   </tbody></table></div></div>`;
 }
 
