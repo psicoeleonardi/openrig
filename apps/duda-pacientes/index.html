@@ -1547,7 +1547,10 @@ function previsaoMes(ym) {
   const cs = APP.contas ? contasDoMes(ym).filter(x => !x.c.foraDoTotal) : [];
   const pago = sum(cs, x => x.pago ? x.pago.valor : x.parcial), aPagar = sum(cs.filter(x => x.aberta), x => x.previsto);
   const fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome.toLowerCase());
-  return { cobrado, agendado, ganhos: cobrado + agendado, recebido, pago, aPagar, gastos: pago + aPagar, aInformar: cs.filter(x => x.aberta && !x.previsto).length, fora };
+  // repasse das sessões do mês (feitas e agendadas), pago às plataformas no mês seguinte
+  const repAg = s => !platOf(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
+  const reps = (db.settings.plataformas || []).map(pl => ({ pl, v: sum(db.sessions.filter(s => s.data.startsWith(ym) && platOf(s) === pl.id), s => billable(s) ? repasseOf(s) : s.status === 'agendado' ? repAg(s) : 0) })).filter(r => r.v > 0.005);
+  return { cobrado, agendado, ganhos: cobrado + agendado, reps, repasse: sum(reps, r => r.v), recebido, pago, aPagar, gastos: pago + aPagar, aInformar: cs.filter(x => x.aberta && !x.previsto).length, fora };
 }
 function previsaoCard(ym) {
   if (!APP.previsao) return '';
@@ -1555,8 +1558,10 @@ function previsaoCard(ym) {
   const linha = (rot, val, det, cor = '') => `<tr><td><b>${rot}</b><div class="muted" style="white-space:normal">${det}</div></td><td class="num"><b${cor ? ` style="color:var(--${cor})"` : ''}>${val}</b></td></tr>`;
   return `<div class="card"><h2>Previsão de ${esc(mes)}</h2><div class="tw"><table><tbody>
     ${linha('Ganhos previstos', money(v.ganhos), `${money(v.cobrado)} de sessões feitas + ${money(v.agendado)} de sessões agendadas · já recebido: ${money(v.recebido)}`, 'ok')}
+    ${v.reps.length ? linha('Repasse previsto às plataformas', '− ' + money(v.repasse), `${v.reps.map(r => `${esc(r.pl.nome)}: ${money(r.v)}`).join(' · ')} · pago em ${esc(MONTHS[Number(ymAdd(ym, 1).slice(5)) - 1])}`, 'warn')
+      + linha('Ganho líquido previsto', money(v.ganhos - v.repasse), 'ganhos previstos menos o repasse das sessões do mês') : ''}
     ${APP.contas ? linha('Gastos previstos', money(v.gastos), `contas que vencem em ${esc(mes)} (ref. ${esc(ant)}) · já pago: ${money(v.pago)}${v.aInformar ? ` · ${v.aInformar} conta${v.aInformar === 1 ? '' : 's'} a informar` : ''}${v.fora.length ? ` · sem ${esc(v.fora.join(', '))}` : ''}`, 'bad') : ''}
-    ${APP.contas ? linha('Sobra prevista', money(sobra), v.aInformar ? 'antes das contas ainda sem valor' : 'ganhos menos gastos', sobra < 0 ? 'bad' : '') : ''}
+    ${APP.contas ? linha('Sobra prevista', money(sobra), `ganhos menos as contas do mês${v.reps.length ? ` (o repasse de ${esc(mes)} entra nas contas de ${esc(MONTHS[Number(ymAdd(ym, 1).slice(5)) - 1])})` : ''}${v.aInformar ? ', antes das contas ainda sem valor' : ''}`, sobra < 0 ? 'bad' : '') : ''}
   </tbody></table></div></div>`;
 }
 
