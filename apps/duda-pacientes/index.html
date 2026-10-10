@@ -261,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  cobranca: true,  // botão "Cobrar" com mensagem do valor em aberto (WhatsApp)
   encaminhamentos: true,  // anotar encaminhamentos recebidos (aparecem em Pendências até virar paciente)
   casal: true,  // cadastro de atendimento de casal (duas pessoas)
   previsao: true,  // quadro com a previsão de ganhos e gastos do mês
@@ -1904,6 +1905,51 @@ function casalPicker(p, campos) {
     onRender: form => form.querySelectorAll('[data-pessoa]').forEach(b => b.addEventListener('click', () => { const x = ps[+b.dataset.pessoa];
       for (const [k, f] of Object.entries(campos.map)) if (form[k]) form[k].value = x[f] || ''; })) };
 }
+/* cobrança: o que ainda está em aberto, item por item (os pagamentos quitam do mais antigo para o mais novo) */
+function emAberto(p) {
+  let pago = sum(paysOf(p.id), x => x.valor);
+  const out = [];
+  for (const it of itensCobrados(p)) {
+    const usa = Math.min(pago, it.valor); pago -= usa;
+    const falta = Math.round((it.valor - usa) * 100) / 100;
+    if (falta > 0.005) out.push({ ...it, falta, parcial: usa > 0.005 });
+  }
+  return out;
+}
+function msgCobranca(p) {
+  const its = emAberto(p), total = sum(its, x => x.falta), st = db.settings, linhas = [];
+  // sessões avulsas agrupadas por mês; mensalidades uma por linha
+  const porMes = new Map();
+  for (const it of its) {
+    if (!it.sessao) { linhas.push({ d: it.data, t: `• ${it.rot[0].toUpperCase() + it.rot.slice(1)}${it.parcial ? ' (restante)' : ''}: ${money(it.falta)}` }); continue; }
+    const ym = it.data.slice(0, 7); if (!porMes.has(ym)) porMes.set(ym, []); porMes.get(ym).push(it);
+  }
+  for (const [ym, l] of porMes) linhas.push({ d: ym + '-00', t: `• ${l.length === 1 ? 'Sessão' : `${l.length} sessões`} de ${MONTHS[Number(ym.slice(5)) - 1]} (${l.map(x => x.rot + (x.parcial ? ' restante' : '')).join(', ')}): ${money(sum(l, x => x.falta))}` });
+  linhas.sort((a, b) => a.d.localeCompare(b.d));
+  const div = isCasal(p) && p.pagador === 'dividido';
+  return [`Olá, {nome}! Tudo bem? Segue o valor em aberto{quem}:`, '', ...linhas.map(x => x.t), '', `Total: ${money(total)}${div ? ` (${money(total / 2)} para cada um)` : ''}`,
+    st.chavePix ? `\nPix: ${st.chavePix}${st.pixNome ? ` (${st.pixNome})` : ''}` : '', '', st.cobrancaFim || 'Qualquer dúvida, estou à disposição. Obrigada!'].filter((x, i, a) => !(x === '' && a[i - 1] === '')).join('\n').replace(/\n{3,}/g, '\n\n');
+}
+actions['cobrar'] = ({ pid }) => {
+  const p = P(pid), b = balance(pid);
+  if (b.bal <= 0.005) { notice(`${p.nome} está em dia.`, 'Não há valor em aberto para cobrar.'); return; }
+  const t = waTarget(p), quem = t?.resp ? ` de ${(p.nomeSocial || p.nome).split(' ')[0]}` : '';
+  const txt = msgCobranca(p).replace('{nome}', t ? t.nome : primeiro(p.nomeSocial || p.nome)).replace('{quem}', isCasal(p) ? ' das sessões de casal' : quem);
+  const d = $('#dlg');
+  d.innerHTML = `<form class="dlg"><h2>Cobrança — ${esc(p.nome)}</h2>
+    <p class="muted" style="margin-top:0">Em aberto: <b>${money(b.bal)}</b>${t ? ` · vai para ${esc(t.nome)}${t.resp ? ' (responsável)' : ''}` : ''}. Pode editar o texto antes de enviar.</p>
+    ${db.settings.chavePix ? '' : '<div class="alert info">Dica: cadastre a sua chave Pix em Configurações → Mensagem de cobrança para ela aparecer aqui.</div>'}
+    <label class="fld"><span>Mensagem</span><textarea name="msg" rows="12">${esc(txt)}</textarea></label>
+    ${t ? '' : '<p class="muted">Sem WhatsApp cadastrado. Copie a mensagem e envie por onde preferir.</p>'}
+    <div class="foot"><button type="button" class="btn" data-close>Fechar</button><button type="button" class="btn" data-copy>Copiar</button>${t ? `<a class="btn primary" data-wa target="_blank" rel="noopener" href="#">Enviar pelo WhatsApp</a>` : ''}</div></form>`;
+  const f = $('form', d), wa = $('[data-wa]', f);
+  const upd = () => { if (wa) wa.href = `${t.url}?text=${encodeURIComponent(f.msg.value)}`; };
+  f.msg.addEventListener('input', upd); upd();
+  $('[data-close]', f).onclick = () => d.close();
+  $('[data-copy]', f).onclick = async () => { try { await navigator.clipboard.writeText(f.msg.value); toast('Mensagem copiada.'); } catch { f.msg.select(); toast('Selecione e copie o texto.'); } };
+  f.onsubmit = e => e.preventDefault();
+  d.showModal();
+};
 function newPayment(pid) {
   const p = P(pid), pay = payer(p), sug = suggestReference(pid);
   if (isCasal(p) && p.pagador === 'dividido' && sug.valor) sug.valor = Math.round(sug.valor * 50) / 100;  // cada um paga a sua metade
@@ -2076,6 +2122,9 @@ const SETTINGS_FIELDS = [
   { k: 'valorPadrao', l: 'Valor padrão da sessão (R$)', t: 'money' }, { k: 'duracaoPadrao', l: 'Duração padrão (min)', t: 'number' },
   { k: 'descricaoNF', l: 'Descrição padrão na nota fiscal', w: 'full' },
   { k: 'linkNF', l: 'Link do emissor de NFS-e (prefeitura ou Emissor Nacional)', t: 'url', w: 'full' },
+  ...(APP.cobranca ? [{ t: 'section', l: 'Mensagem de cobrança' },
+    { k: 'chavePix', l: 'Chave Pix (vai na mensagem)', ph: 'CPF, e-mail, telefone ou chave aleatória' }, { k: 'pixNome', l: 'Nome que aparece no Pix', ph: 'Para o paciente conferir' },
+    { k: 'cobrancaFim', l: 'Frase final da mensagem', w: 'full', ph: 'Qualquer dúvida, estou à disposição. Obrigada!' }] : []),
   { t: 'section', l: 'Google Agenda' },
   { k: 'gcalPrefixo', l: 'Início do título do evento', ph: 'Sessão' },
   { k: 'gcalTitulo', l: 'Como o paciente aparece no título', t: 'select', opts: [['iniciais', 'Só as iniciais (ex.: Sessão — M.S.)'], ['primeiro', 'Primeiro nome'], ['completo', 'Nome completo']],
@@ -2458,7 +2507,7 @@ function vDashboard() {
         <div class="card"><h2>Contatos com responsáveis</h2>${contacts.length ? `<div class="tw"><table><tbody>${contacts.map(c => `<tr><td><a href="#/p/${c.p.id}/contatos">${esc(c.p.nome)}</a><div class="muted">${fmtD(c.next)}</div></td><td>${(() => { const r = c.p.responsaveis.find(r => waLink(r.telefone)); return r ? `<a class="wa" href="${waLink(r.telefone)}" target="_blank" rel="noopener" title="WhatsApp de ${esc(r.nome)}">WhatsApp ${esc(r.nome.split(' ')[0])}</a>` : ''; })()}</td><td>${contactBadge(c.dias)}</td><td class="acts"><button class="btn sm" data-act="new-contact" data-pid="${c.p.id}">Registrar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhum contato previsto para os próximos 7 dias.</div>'}</div>
         ${reps.length ? `<div class="card"><h2>Repasses às plataformas</h2><div class="tw"><table><tbody>${reps.map(r => `<tr><td><b>${esc(r.pl.nome)}</b><div class="muted">${esc(MONTHS[Number(month.slice(5)) - 1])}: ${money(r.mes)} · ${esc(platRegra(r.pl))}</div></td>
           <td class="num">${r.saldo > 0.005 ? `<b style="color:var(--warn)">${money(r.saldo)}</b>` : '<span class="muted">em dia</span>'}</td><td class="acts">${r.saldo > 0.005 ? `<button class="btn sm" data-act="pay-plat" data-id="${r.pl.id}">Pagar</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
-        ${owing.length ? `<div class="card"><h2>Saldos em aberto</h2><div class="tw"><table><tbody>${owing.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.bal)}</td><td class="acts"><button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+        ${owing.length ? `<div class="card"><h2>Saldos em aberto</h2><div class="tw"><table><tbody>${owing.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.bal)}</td><td class="acts">${APP.cobranca ? `<button class="btn sm" data-act="cobrar" data-pid="${x.p.id}">Cobrar</button>` : ''}<button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
       </div>
     </div>`;
 }
@@ -2497,7 +2546,7 @@ function vPatient({ id, tab = 'dados' }) {
   const body = { dados: tDados, atendimentos: tAtend, financeiro: tFin, contatos: tContatos, prontuario: tPront, estudo: tEstudo, plano: tPlano }[tab] || tDados;
   return `<div class="head"><div><div class="muted"><a href="#/pacientes">← Pacientes</a></div><h1>${esc(p.nome)}</h1>
       <div class="row">${isCasal(p) ? badge('casal', 'acc') : a !== null ? `<span class="muted">${a} anos</span>` : ''}${minor ? badge('menor de idade', 'acc') : ''}${badge(P_STATUS[p.status], p.status === 'ativo' ? 'ok' : 'warn')}${p.modalidade ? badge(p.modalidade) : ''}</div></div>
-    <div class="actions"><button class="btn" data-act="new-session" data-pid="${p.id}">+ Agendar</button><button class="btn" data-act="new-record" data-pid="${p.id}">+ Prontuário</button>${menu([['edit-patient', 'Editar dados', { id: p.id }], ['new-payment', 'Registrar pagamento', { pid: p.id }], ['del-patient', 'Excluir paciente', { id: p.id }, 'danger']])}</div></div>
+    <div class="actions"><button class="btn" data-act="new-session" data-pid="${p.id}">+ Agendar</button><button class="btn" data-act="new-record" data-pid="${p.id}">+ Prontuário</button>${menu([['edit-patient', 'Editar dados', { id: p.id }], ['new-payment', 'Registrar pagamento', { pid: p.id }], ...(APP.cobranca ? [['cobrar', 'Mensagem de cobrança', { pid: p.id }]] : []), ['del-patient', 'Excluir paciente', { id: p.id }, 'danger']])}</div></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/p/${p.id}/${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>
     ${body(p)}`;
 }
@@ -2569,7 +2618,7 @@ function tFin(p) {
     return `<div class="card"><h2>Mensalidades</h2><p class="muted" style="margin:0 0 6px">Cobrança atual: <b>${cobrancaTxt(p)}</b>. O mês entra quando tem pelo menos um atendimento cobrável.</p>${ms.length ? `<div class="tw"><table><tbody>${ms.slice().reverse().map(m => `<tr><td>${esc(fmtMonth(m.ym))}</td><td class="num">${money(m.valor)}</td><td class="muted">${sessOf(p.id).filter(s => billable(s) && s.data.startsWith(m.ym)).length} atendimento(s)</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">Nenhum mês cobrado ainda.</p>'}</div>`; })()}
   <div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
     <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
-    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div>${payTable(pays, { showPat: false })}</div>
+    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><div class="actions">${APP.cobranca && b.bal > 0.005 ? `<button class="btn sm" data-act="cobrar" data-pid="${p.id}">Cobrar ${money(b.bal)}</button>` : ''}<button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div></div>${payTable(pays, { showPat: false })}</div>
     <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
       ${isCasal(p) ? `<p class="muted">Casal: ${p.pagador === 'dividido' ? 'cada pessoa paga a sua parte; a nota sai em nome de quem pagou' : `a nota sai em nome de ${esc(payer(p).nome || 'pessoa ' + (p.pagador || 1))}`}.</p>` : ''}
       ${isMinor(p) ? `<p class="muted">Paciente menor: a nota sai em nome do responsável financeiro (${esc(payer(p).nome || 'não definido')}).</p>` : ''}${invTable(invs, { showPat: false })}</div>`;
@@ -2701,7 +2750,7 @@ function vFinance() {
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
     <div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>
     ${semNF.length ? `<div class="card"><h2>Pagamentos sem nota fiscal</h2>${payTable(semNF)}</div>` : ''}
-    <div class="card"><h2>Saldos por paciente</h2>${bals.length ? `<div class="tw"><table><thead><tr><th>Paciente</th><th class="num">Cobrável</th><th class="num">Pago</th><th class="num">Saldo</th><th></th></tr></thead><tbody>${bals.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.due)}</td><td class="num">${money(x.paid)}</td><td class="num">${x.bal > 0 ? `<b style="color:var(--warn)">${money(x.bal)}</b>` : `<span class="muted">crédito ${money(-x.bal)}</span>`}</td><td class="acts">${x.bal > 0 ? `<button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Todos os pacientes estão em dia.</div>'}</div>`;
+    <div class="card"><h2>Saldos por paciente</h2>${bals.length ? `<div class="tw"><table><thead><tr><th>Paciente</th><th class="num">Cobrável</th><th class="num">Pago</th><th class="num">Saldo</th><th></th></tr></thead><tbody>${bals.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.due)}</td><td class="num">${money(x.paid)}</td><td class="num">${x.bal > 0 ? `<b style="color:var(--warn)">${money(x.bal)}</b>` : `<span class="muted">crédito ${money(-x.bal)}</span>`}</td><td class="acts">${x.bal > 0 ? `${APP.cobranca ? `<button class="btn sm" data-act="cobrar" data-pid="${x.p.id}">Cobrar</button>` : ''}<button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Todos os pacientes estão em dia.</div>'}</div>`;
 }
 
 function vContacts() {
