@@ -261,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  encaminhamentos: true,  // anotar encaminhamentos recebidos (aparecem em Pendências até virar paciente)
   casal: true,  // cadastro de atendimento de casal (duas pessoas)
   previsao: true,  // quadro com a previsão de ganhos e gastos do mês
   tarefas: true,  // aba Tarefas (as abertas aparecem em Pendências)
@@ -442,7 +443,7 @@ function emptyDB() {
   return { v: 1, patients: [], sessions: [], payments: [], invoices: [], contacts: [], records: [], settings: {} };
 }
 function migrate(d) {
-  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas', 'tarefas']) if (!Array.isArray(d[k])) d[k] = [];
+  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas', 'tarefas', 'encaminhamentos']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais', backupDias: 7, ultimoBackup: '', backupAdiado: '' }, d.settings || {});
   if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
   if (!d.settings.platSeed) {  // plataformas padrão desta versão (uma vez só; se excluídas, não voltam)
@@ -659,14 +660,14 @@ let cloudTimer = null, cloudBusy = false, cloudSeen = 0, legacyCleanup = false, 
 const PART_KEYS = ['sessions', 'payments', 'invoices', 'contacts', 'records'];
 const partId = pid => 'p-' + String(pid).replace(/[^A-Za-z0-9_-]/g, '_');
 function splitDB(d) {
-  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas, tarefas: d.tarefas } }, by = {};
+  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas, tarefas: d.tarefas, encaminhamentos: d.encaminhamentos } }, by = {};
   for (const p of d.patients) by[p.id] = parts[partId(p.id)] = { patient: p, sessions: [], payments: [], invoices: [], contacts: [], records: [] };
   for (const k of PART_KEYS) for (const r of d[k]) by[r.pacienteId]?.[k].push(r);
   return parts;
 }
 function joinDB(parts) {
   const d = emptyDB(), c = parts.core || {};
-  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || []; d.tarefas = c.tarefas || [];
+  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || []; d.tarefas = c.tarefas || []; d.encaminhamentos = c.encaminhamentos || [];
   for (const [id, x] of Object.entries(parts)) {
     if (id === 'core' || !x?.patient) continue;
     d.patients.push(x.patient);
@@ -1257,9 +1258,9 @@ function patientFormUI(form) {  // o repasse diferente só aparece se houver pla
 }
 const cobrancaValues = p => { const c = cobrancaEm(p, today().slice(0, 7)); return { cobranca: c.tipo, mensalidade: c.tipo === 'mensal' ? c.valor : '', mensalDesde: today().slice(0, 7) }; };
 function cleanRepasse(v) { if (!v.plataformaId || !v.repasseDif) v.repasse = ''; delete v.repasseDif; }
-actions['new-patient'] = () => openForm({
+actions['new-patient'] = ({ pre, encId } = {}) => openForm({  // pre: dados vindos de um encaminhamento
   title: 'Novo paciente', fields: patientFields(), onRender: patientFormUI,
-  values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true, cobranca: 'sessao', mensalDesde: today().slice(0, 7) },
+  values: { status: 'ativo', inicio: today(), valor: db.settings.valorPadrao, cobrarFalta: true, cobranca: 'sessao', mensalDesde: today().slice(0, 7), ...(pre || {}) },
   onSave: async v => {
     if (v.cobranca === 'mensal' && !num(v.mensalidade)) { notice('Informe o valor por mês.'); return false; }
     cleanRepasse(v); casalSave(v);
@@ -1269,6 +1270,8 @@ actions['new-patient'] = () => openForm({
     const p = { id: uid(), ...v, responsaveis: [], series: [], docs: [], estudo: {}, plano: { metas: [] }, criadoEm: new Date().toISOString() };
     aplicarCobranca(p, cob);
     db.patients.push(p);
+    const en = encId && (db.encaminhamentos || []).find(x => x.id === encId);
+    if (en) Object.assign(en, { status: 'virou', pacienteId: p.id, fechadoEm: today() });
     curRoute = `p/${p.id}/dados`;
     await commit(isMinor(p) ? 'Paciente cadastrado. Agora adicione os responsáveis.' : 'Paciente cadastrado.');
   },
@@ -1596,6 +1599,39 @@ function previsaoCard(ym) {
     ${linha('Sobra prevista', money(sobra), v.aInformar ? 'falta informar o valor de algumas contas' : '', sobra < 0 ? 'bad' : '')}
   </tbody></table></div></div>`;
 }
+
+/* encaminhamentos: quem a plataforma mandou e ainda não virou paciente; ficam em Pendências */
+const encAbertos = () => (db.encaminhamentos || []).filter(e => e.status === 'aberto').sort((a, b) => (a.data || '').localeCompare(b.data || ''));
+const encFields = () => [
+  { k: 'nome', l: 'Nome', req: true, w: 'full' },
+  { k: 'telefone', l: 'Telefone / WhatsApp', t: 'tel', ph: '(11) 98888-7777' },
+  { k: 'plataformaId', l: 'Veio de', t: 'select', opts: [...(db.settings.plataformas || []).map(pl => [pl.id, pl.nome]), ['', 'Outro / indicação']] },
+  { k: 'data', l: 'Recebido em', t: 'date' },
+  { k: 'obs', l: 'Observações (demanda, horário que prefere…)', t: 'textarea', rows: 3 },
+];
+function encMsg(e) {
+  const pl = PLAT(e.plataformaId), st = db.settings;
+  return `Olá, ${primeiro(e.nome)}! Aqui é ${st.nome ? primeiro(st.nome) : 'a psicóloga'}${st.nome ? ', psicóloga' : ''}. Recebi seu contato${pl ? ` pela ${pl.nome}` : ''} e gostaria de combinar o primeiro atendimento.`;
+}
+function encLi(e) {
+  const pl = PLAT(e.plataformaId), d = -daysUntil(e.data || today()), w = waLink(e.telefone);
+  const quando = d <= 0 ? 'hoje' : d === 1 ? 'ontem' : `há ${d} dias`;
+  return `<li><b>Novo encaminhamento${pl ? ` ${esc(pl.nome)}` : ''}:</b> ${esc(e.nome)} <span class="muted">· ${quando}</span>${d > 2 ? ' ' + badge('esperando contato', 'warn') : ''}
+    <div class="row" style="gap:6px;margin:4px 0 6px">${w ? `<a class="wa" href="${w}?text=${encodeURIComponent(encMsg(e))}" target="_blank" rel="noopener">WhatsApp</a>` : ''}
+      <button class="btn sm" data-act="enc-cadastrar" data-id="${e.id}">Virou paciente</button><button class="btn sm" data-act="enc-nao" data-id="${e.id}">Não seguiu</button>
+      ${menu([['edit-enc', 'Editar', { id: e.id }], ['del-enc', 'Excluir', { id: e.id }, 'danger']])}</div>${e.obs ? `<div class="muted pre" style="margin-top:-2px">${esc(e.obs)}</div>` : ''}</li>`;
+}
+const ENC = id => (db.encaminhamentos || []).find(x => x.id === id);
+actions['new-enc'] = () => openForm({ title: 'Novo encaminhamento', fields: encFields(), saveLabel: 'Salvar',
+  values: { data: today(), plataformaId: (db.settings.plataformas || []).find(pl => /sameca/i.test(pl.nome))?.id ?? (db.settings.plataformas || [])[0]?.id ?? '' },
+  onSave: async v => { db.encaminhamentos.push({ id: 'e' + uid().replace(/-/g, '').slice(0, 10), ...v, data: v.data || today(), status: 'aberto', criadoEm: new Date().toISOString() }); await commit('Encaminhamento anotado. Ele aparece em Pendências.'); } });
+actions['edit-enc'] = ({ id }) => { const e = ENC(id); openForm({ title: 'Editar encaminhamento', fields: encFields(), values: e, onSave: async v => { Object.assign(e, v); await commit('Encaminhamento atualizado.'); } }); };
+actions['del-enc'] = async ({ id }) => { if (!(await ask({ title: 'Excluir este encaminhamento?', ok: 'Excluir', danger: true }))) return; db.encaminhamentos = db.encaminhamentos.filter(x => x.id !== id); await commit('Encaminhamento excluído.'); };
+actions['enc-nao'] = async ({ id }) => { const e = ENC(id); if (!e) return; Object.assign(e, { status: 'nao', fechadoEm: today() }); await commit(`${e.nome}: marcado como “não seguiu”.`); };
+actions['enc-cadastrar'] = ({ id }) => {
+  const e = ENC(id); if (!e) return; const pl = PLAT(e.plataformaId);
+  actions['new-patient']({ encId: id, pre: { nome: e.nome, telefone: e.telefone, plataformaId: e.plataformaId || '', encaminhadoPor: pl ? pl.nome : '', obs: e.obs || '' } });
+};
 
 /* tarefas: lista simples; as abertas aparecem em Pendências na tela inicial */
 const tarefasAbertas = () => (db.tarefas || []).filter(t => !t.feita).sort((a, b) => (a.prazo || '9999').localeCompare(b.prazo || '9999') || (a.criadaEm || '').localeCompare(b.criadaEm || ''));
@@ -2381,6 +2417,7 @@ function vDashboard() {
   const noGuard = active.filter(p => isMinor(p) && !p.responsaveis.length);
   const noContract = active.filter(p => !hasContract(p));
   const pend = [
+    ...(APP.encaminhamentos ? encAbertos().map(encLi) : []),
     ...(APP.tarefas ? tarefasAbertas().map(tarefaLi) : []),
     noContract.length && (noContract.length <= 3
       ? noContract.map(p => `<li><a href="#/p/${p.id}/dados">${esc(p.nome)}</a> está sem contrato anexado.</li>`).join('')
@@ -2396,7 +2433,7 @@ function vDashboard() {
         <div style="font-size:.88em;margin-top:2px">Guarde o arquivo fora deste aparelho: no iPad, em Arquivos → iCloud Drive ou Google Drive.</div></div>
       <div class="row"><button class="btn sm primary" data-act="export-vault">Baixar backup agora</button><button class="btn sm" data-act="backup-later">Lembrar em 2 dias</button></div></div>` : ''}
   <div class="head"><div><h1>Olá${db.settings.nome ? ', ' + esc(db.settings.nome.split(' ')[0]) : ''}!</h1><div class="muted">${fmtDW(t)}</div></div>
-    <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button><button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
+    <div class="actions"><button class="btn" data-act="new-session">+ Agendar</button><button class="btn" data-act="new-payment">+ Pagamento</button>${APP.encaminhamentos ? '<button class="btn" data-act="new-enc">+ Encaminhamento</button>' : ''}<button class="btn primary" data-act="new-patient">+ Paciente</button></div></div>
     <div class="stats">
       <div class="stat"><b>${active.length}</b><span>pacientes ativos</span></div>
       <div class="stat"><b>${upcoming.length}</b><span>sessões nos próximos 7 dias</span></div>
@@ -2444,7 +2481,7 @@ function vPatients() {
         <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}${p.status === 'ativo' && !hasContract(p) ? ' ' + badge('sem contrato', 'warn') : ''}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   };
-  return `<div class="head"><h1>Pacientes</h1><div class="actions"><button class="btn primary" data-act="new-patient">+ Novo paciente</button></div></div>
+  return `<div class="head"><h1>Pacientes</h1><div class="actions">${APP.encaminhamentos ? '<button class="btn" data-act="new-enc">+ Encaminhamento</button>' : ''}<button class="btn primary" data-act="new-patient">+ Novo paciente</button></div></div>
     <div class="card"><div class="toolbar">
       <label class="fld"><span>Buscar</span><input data-ui="pq" data-soft="1" value="${esc(ui.pq)}" placeholder="Nome, CPF, telefone ou responsável"></label>
       <label class="fld" style="flex:0 1 200px"><span>Situação</span><select data-ui="pstatus">${optsHTML([['', 'Todos'], ...Object.entries(P_STATUS), ['menores', 'Menores de idade (ativos)'], ['semcontrato', 'Ativos sem contrato']], ui.pstatus)}</select></label>
