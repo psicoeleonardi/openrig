@@ -2516,7 +2516,7 @@ actions['show-nocontract'] = () => { ui.pstatus = 'semcontrato'; go('pacientes')
 function vPatients() {
   listRenderer = () => {
     const q = ui.pq.trim().toLowerCase();
-    const list = db.patients.filter(p => (!ui.pstatus || p.status === ui.pstatus || (ui.pstatus === 'menores' && isMinor(p) && p.status === 'ativo') || (ui.pstatus === 'semcontrato' && p.status === 'ativo' && !hasContract(p)))
+    const list = db.patients.filter(p => (!ui.pstatus || p.status === ui.pstatus || (ui.pstatus === 'menores' && isMinor(p) && p.status === 'ativo') || (ui.pstatus === 'semcontrato' && p.status === 'ativo' && !hasContract(p)) || (ui.pstatus === 'abertos' && balance(p.id).bal > 0.005))
       && (!q || [p.nome, p.nomeSocial, p.cpf, p.telefone, ...p.responsaveis.map(r => r.nome)].some(v => String(v || '').toLowerCase().includes(q))))
       .sort((a, b) => a.nome.localeCompare(b.nome));
     if (!list.length) return `<div class="empty">${db.patients.length ? 'Nenhum paciente encontrado.' : 'Nenhum paciente cadastrado ainda. Clique em “+ Novo paciente”.'}</div>`;
@@ -2526,14 +2526,14 @@ function vPatients() {
         <td>${isCasal(p) ? badge('casal', 'acc') : `${a ?? '—'}${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}`}</td>
         <td>${isCasal(p) ? [[p.nome1, p.telefone], [p.nome2, p.telefone2]].filter(x => x[1]).map(([n, t]) => `<div>${esc(primeiro(n))}: ${phoneHTML(t)}</div>`).join('') : isMinor(p) && p.responsaveis[0] ? `${esc(p.responsaveis[0].nome)}<div class="muted">${phoneHTML(p.responsaveis[0].telefone)}</div>` : phoneHTML(p.telefone)}</td>
         <td>${ns ? `${fmtDW(ns.data)} <span class="muted">${esc(ns.hora || '')}</span>` : '<span class="muted">—</span>'}</td>
-        <td class="num">${b.bal > 0.005 ? `<span style="color:var(--warn)">${money(b.bal)}</span>` : b.bal < -0.005 ? `<span class="muted">crédito ${money(-b.bal)}</span>` : '<span class="muted">em dia</span>'}</td>
+        <td class="num">${b.bal > 0.005 ? `<span style="color:var(--warn)">${money(b.bal)}</span>${APP.cobranca ? `<div style="margin-top:4px"><button class="btn sm" data-act="cobrar" data-pid="${p.id}">Cobrar</button></div>` : ''}` : b.bal < -0.005 ? `<span class="muted">crédito ${money(-b.bal)}</span>` : '<span class="muted">em dia</span>'}</td>
         <td>${badge(P_STATUS[p.status] || p.status, p.status === 'ativo' ? 'ok' : p.status === 'pausa' ? 'warn' : '')}${p.status === 'ativo' && !hasContract(p) ? ' ' + badge('sem contrato', 'warn') : ''}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   };
   return `<div class="head"><h1>Pacientes</h1><div class="actions">${APP.encaminhamentos ? '<button class="btn" data-act="new-enc">+ Encaminhamento</button>' : ''}<button class="btn primary" data-act="new-patient">+ Novo paciente</button></div></div>
     <div class="card"><div class="toolbar">
       <label class="fld"><span>Buscar</span><input data-ui="pq" data-soft="1" value="${esc(ui.pq)}" placeholder="Nome, CPF, telefone ou responsável"></label>
-      <label class="fld" style="flex:0 1 200px"><span>Situação</span><select data-ui="pstatus">${optsHTML([['', 'Todos'], ...Object.entries(P_STATUS), ['menores', 'Menores de idade (ativos)'], ['semcontrato', 'Ativos sem contrato']], ui.pstatus)}</select></label>
+      <label class="fld" style="flex:0 1 200px"><span>Situação</span><select data-ui="pstatus">${optsHTML([['', 'Todos'], ...Object.entries(P_STATUS), ['menores', 'Menores de idade (ativos)'], ['semcontrato', 'Ativos sem contrato'], ...(APP.cobranca ? [['abertos', 'Com valor em aberto']] : [])], ui.pstatus)}</select></label>
     </div><div id="list">${listRenderer()}</div></div>`;
 }
 
