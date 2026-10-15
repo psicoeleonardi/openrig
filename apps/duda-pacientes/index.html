@@ -261,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  nfSimples: true,  // notas fiscais: só marcar, em cada pagamento, se a nota foi emitida
   cobranca: true,  // botão "Cobrar" com mensagem do valor em aberto (WhatsApp)
   encaminhamentos: true,  // anotar encaminhamentos recebidos (aparecem em Pendências até virar paciente)
   casal: true,  // cadastro de atendimento de casal (duas pessoas)
@@ -2423,10 +2424,23 @@ function payTable(list, { showPat = true } = {}) {
     return `<tr><td>${fmtD(x.data)}</td>${showPat ? `<td><a href="#/p/${p.id}/financeiro">${esc(p.nome)}</a></td>` : ''}
       <td>${esc(x.forma || '')}${x.parcelas > 1 ? ` (${esc(x.parcelas)}x)` : ''}</td><td>${esc(x.referencia || '')}${x.pagador && x.pagador !== p.nome ? `<div class="muted">pago por ${esc(x.pagador)}</div>` : ''}</td>
       <td class="num">${money(x.valor)}</td>
-      <td>${inv ? badge(inv.status === 'emitida' ? `NF ${inv.numero || ''}` : 'NF a emitir', NF_BADGE[inv.status]) : badge('sem NF', 'bad')}</td>
-      <td class="acts">${menu([['receipt', 'Imprimir recibo', { id: x.id }], !inv && ['new-invoice', 'Gerar nota fiscal', { pid: p.id, pay: x.id }], ['edit-payment', 'Editar', { id: x.id }], ['del-payment', 'Excluir', { id: x.id }, 'danger']])}</td></tr>`;
+      <td>${APP.nfSimples ? `<label class="check" style="white-space:nowrap"><input type="checkbox" data-act="nf-toggle" data-id="${x.id}"${inv?.status === 'emitida' ? ' checked' : ''}> emitida</label>`
+        : inv ? badge(inv.status === 'emitida' ? `NF ${inv.numero || ''}` : 'NF a emitir', NF_BADGE[inv.status]) : badge('sem NF', 'bad')}</td>
+      <td class="acts">${menu([['receipt', 'Imprimir recibo', { id: x.id }], !inv && !APP.nfSimples && ['new-invoice', 'Gerar nota fiscal', { pid: p.id, pay: x.id }], ['edit-payment', 'Editar', { id: x.id }], ['del-payment', 'Excluir', { id: x.id }, 'danger']])}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
+actions['nf-toggle'] = async ({ id }) => {  // modo simples: marca/desmarca a nota deste pagamento
+  const x = PAY(id), inv = invoiceOf(id);
+  if (inv?.status === 'emitida') {
+    inv.pagamentos = (inv.pagamentos || []).filter(v => v !== id);
+    if (!inv.pagamentos.length) db.invoices = db.invoices.filter(i => i !== inv);
+    await commit('Nota desmarcada.');
+  } else if (inv) { Object.assign(inv, { status: 'emitida', dataEmissao: inv.dataEmissao || today() }); await commit('Nota marcada como emitida.'); }
+  else {
+    db.invoices.push({ id: uid(), pacienteId: x.pacienteId, pagamentos: [id], status: 'emitida', dataEmissao: today(), competencia: (x.data || today()).slice(0, 7), valor: num(x.valor), simples: true });
+    await commit('Nota marcada como emitida.');
+  }
+};
 function invTable(list, { showPat = true } = {}) {
   if (!list.length) return '<div class="empty">Nenhuma nota fiscal.</div>';
   return `<div class="tw"><table><thead><tr><th>Nº</th><th>Emissão</th>${showPat ? '<th>Paciente</th>' : ''}<th>Tomador</th><th class="num">Valor</th><th>Situação</th><th></th></tr></thead><tbody>${list.map(i => {
@@ -2618,10 +2632,10 @@ function tFin(p) {
     return `<div class="card"><h2>Mensalidades</h2><p class="muted" style="margin:0 0 6px">Cobrança atual: <b>${cobrancaTxt(p)}</b>. O mês entra quando tem pelo menos um atendimento cobrável.</p>${ms.length ? `<div class="tw"><table><tbody>${ms.slice().reverse().map(m => `<tr><td>${esc(fmtMonth(m.ym))}</td><td class="num">${money(m.valor)}</td><td class="muted">${sessOf(p.id).filter(s => billable(s) && s.data.startsWith(m.ym)).length} atendimento(s)</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted" style="margin:0">Nenhum mês cobrado ainda.</p>'}</div>`; })()}
   <div class="stats"><div class="stat"><b>${money(b.due)}</b><span>total cobrável</span></div><div class="stat"><b>${money(b.paid)}</b><span>total pago</span></div>
     <div class="stat ${b.bal > 0.005 ? 'warn' : ''}"><b>${money(Math.abs(b.bal))}</b><span>${b.bal > 0.005 ? 'a receber' : b.bal < -0.005 ? 'crédito (pago adiantado)' : 'saldo — em dia'}</span></div></div>
-    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><div class="actions">${APP.cobranca && b.bal > 0.005 ? `<button class="btn sm" data-act="cobrar" data-pid="${p.id}">Cobrar ${money(b.bal)}</button>` : ''}<button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div></div>${payTable(pays, { showPat: false })}</div>
-    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
+    <div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Pagamentos</h2><div class="actions">${APP.nfSimples ? nfLink() : ''}${APP.cobranca && b.bal > 0.005 ? `<button class="btn sm" data-act="cobrar" data-pid="${p.id}">Cobrar ${money(b.bal)}</button>` : ''}<button class="btn sm primary" data-act="new-payment" data-pid="${p.id}">+ Pagamento</button></div></div>${payTable(pays, { showPat: false })}</div>
+    ${APP.nfSimples ? '' : `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Notas fiscais</h2><div class="actions">${nfLink()}<button class="btn sm primary" data-act="new-invoice" data-pid="${p.id}">+ Nota fiscal</button></div></div>
       ${isCasal(p) ? `<p class="muted">Casal: ${p.pagador === 'dividido' ? 'cada pessoa paga a sua parte; a nota sai em nome de quem pagou' : `a nota sai em nome de ${esc(payer(p).nome || 'pessoa ' + (p.pagador || 1))}`}.</p>` : ''}
-      ${isMinor(p) ? `<p class="muted">Paciente menor: a nota sai em nome do responsável financeiro (${esc(payer(p).nome || 'não definido')}).</p>` : ''}${invTable(invs, { showPat: false })}</div>`;
+      ${isMinor(p) ? `<p class="muted">Paciente menor: a nota sai em nome do responsável financeiro (${esc(payer(p).nome || 'não definido')}).</p>` : ''}${invTable(invs, { showPat: false })}</div>`}`;
 }
 function tContatos(p) {
   const ci = contactInfo(p);
@@ -2730,7 +2744,7 @@ function vFinance() {
   const bals = db.patients.map(p => ({ p, ...balance(p.id) })).filter(x => Math.abs(x.bal) > 0.005).sort((a, b) => b.bal - a.bal);
   const reps = repasseResumo(month), repMes = sum(reps, r => r.mes);
   const repPagosMes = db.repassesPagos.filter(r => (r.data || '').startsWith(month)).sort((a, b) => b.data.localeCompare(a.data));
-  return `<div class="head"><h1>Financeiro</h1><div class="actions">${nfLink()}<button class="btn" data-act="new-invoice">+ Nota fiscal</button><button class="btn primary" data-act="new-payment">+ Pagamento</button></div></div>
+  return `<div class="head"><h1>Financeiro</h1><div class="actions">${nfLink()}${APP.nfSimples ? '' : '<button class="btn" data-act="new-invoice">+ Nota fiscal</button>'}<button class="btn primary" data-act="new-payment">+ Pagamento</button></div></div>
     <div class="card"><div class="toolbar"><label class="fld" style="flex:0 1 220px"><span>Mês</span><input type="month" data-ui="finMonth" value="${month}"></label></div>
       <div class="stats" style="margin:0"><div class="stat"><b>${money(sum(pays, x => x.valor))}</b><span>recebido em ${fmtMonth(month)}</span>${formaTags(pays)}</div>
       <div class="stat"><b>${money(billed)}</b><span>sessões cobráveis no mês</span></div><div class="stat"><b>${money(nfTotal)}</b><span>em notas emitidas no mês</span></div>
@@ -2748,8 +2762,8 @@ function vFinance() {
     ${contasFinCard(month)}
     ${platCard(reps, repPagosMes, month)}
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
-    <div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>
-    ${semNF.length ? `<div class="card"><h2>Pagamentos sem nota fiscal</h2>${payTable(semNF)}</div>` : ''}
+    ${APP.nfSimples ? '' : `<div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>`}
+    ${semNF.length ? `<div class="card"><h2>Pagamentos sem nota fiscal</h2>${APP.nfSimples ? '<p class="muted" style="margin:0 0 6px">Depois de emitir no portal, marque “emitida”.</p>' : ''}${payTable(semNF)}</div>` : ''}
     <div class="card"><h2>Saldos por paciente</h2>${bals.length ? `<div class="tw"><table><thead><tr><th>Paciente</th><th class="num">Cobrável</th><th class="num">Pago</th><th class="num">Saldo</th><th></th></tr></thead><tbody>${bals.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.due)}</td><td class="num">${money(x.paid)}</td><td class="num">${x.bal > 0 ? `<b style="color:var(--warn)">${money(x.bal)}</b>` : `<span class="muted">crédito ${money(-x.bal)}</span>`}</td><td class="acts">${x.bal > 0 ? `${APP.cobranca ? `<button class="btn sm" data-act="cobrar" data-pid="${x.p.id}">Cobrar</button>` : ''}<button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Todos os pacientes estão em dia.</div>'}</div>`;
 }
 
