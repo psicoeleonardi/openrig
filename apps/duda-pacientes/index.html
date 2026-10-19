@@ -261,6 +261,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  feriados: true,  // feriados nacionais: lembrete e tarefa para avisar/remarcar quem tem sessão no dia
   nfSimples: true,  // notas fiscais: só marcar, em cada pagamento, se a nota foi emitida
   cobranca: true,  // botão "Cobrar" com mensagem do valor em aberto (WhatsApp)
   encaminhamentos: true,  // anotar encaminhamentos recebidos (aparecem em Pendências até virar paciente)
@@ -931,7 +932,7 @@ document.addEventListener('visibilitychange', async () => {
   } catch {}
 });
 async function commit(msg) {
-  topUpSeries();
+  topUpSeries(); syncFeriados();
   db.atualizadoEm = new Date().toISOString();
   await persist();
   render();
@@ -1036,7 +1037,7 @@ document.addEventListener('submit', async e => {
 });
 
 function start() {
-  if (topUpSeries()) persist();
+  if (topUpSeries() | syncFeriados()) persist();
   migrateAppearance().then(m => { applyAppearance(); if (m) persist(); }).catch(() => {});
   restoreFileQueue().catch(() => {});
   $('#lock').hidden = true; $('#lock').innerHTML = '';
@@ -1644,7 +1645,9 @@ function prazoBadge(t) {
 }
 function tarefaLi(t) {  // item de Pendências, com caixinha para concluir
   const pc = t.pacienteId && P(t.pacienteId);
-  return `<li style="list-style:none;margin-left:-18px"><label class="check" style="display:inline-flex;font-size:inherit"><input type="checkbox" data-act="toggle-task" data-id="${t.id}"> ${esc(t.titulo)}</label>${pc ? ` <span class="muted">· <a href="#/p/${pc.id}/dados">${esc(pc.nome)}</a></span>` : ''}${prazoBadge(t)}</li>`;
+  return `<li style="list-style:none;margin-left:-18px"><label class="check" style="display:inline-flex;font-size:inherit"><input type="checkbox" data-act="toggle-task" data-id="${t.id}"> ${esc(t.titulo)}</label>${pc ? ` <span class="muted">· <a href="#/p/${pc.id}/dados">${esc(pc.nome)}</a></span>` : ''}${prazoBadge(t)}${t.origem === 'feriado' && pc ? (() => {
+    const f = feriado(t.feriadoData), w = waMsg(pc, `Olá, {nome}! ${WD_FULL[parseISO(t.feriadoData).getDay()][0].toUpperCase() + WD_FULL[parseISO(t.feriadoData).getDay()].slice(1)}, ${fmtD(t.feriadoData).slice(0, 5)}, é feriado${f ? ` (${f.nome})` : ''}. Vamos remarcar a sessão{quem}? Me diga qual dia e horário ficam bons para você.`);
+    return w ? ` <a class="wa" href="${w}" target="_blank" rel="noopener">WhatsApp</a>` : ''; })() : ''}</li>`;
 }
 const tarefaFields = () => [
   { k: 'titulo', l: 'Tarefa', req: true, w: 'full' }, { k: 'prazo', l: 'Prazo (opcional)', t: 'date' },
@@ -1667,6 +1670,7 @@ actions['edit-task'] = ({ id }) => { const t = db.tarefas.find(x => x.id === id)
 actions['del-task'] = async ({ id }) => {
   const t = db.tarefas.find(x => x.id === id);
   if (!(await ask({ title: 'Excluir esta tarefa?', text: t.titulo, ok: 'Excluir', danger: true }))) return;
+  if (t.feriadoKey) db.settings.feriadoVistos = [...(db.settings.feriadoVistos || []), t.feriadoKey].slice(-200);  // não recria
   db.tarefas = db.tarefas.filter(x => x.id !== id); await commit('Tarefa excluída.');
 };
 actions['clear-done'] = async () => {
@@ -1755,6 +1759,48 @@ function topUpSeries() {
     }
   }
   return n;
+}
+/* feriados nacionais (fixos + os que dependem da Páscoa); facultativos marcados como tal */
+const _fer = {};
+function feriadosDoAno(y) {
+  if (_fer[y]) return _fer[y];
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const pascoa = `${y}-${pad(Math.floor((h + l - 7 * m + 114) / 31))}-${pad((h + l - 7 * m + 114) % 31 + 1)}`;
+  const fx = [['01-01', 'Confraternização Universal'], ['04-21', 'Tiradentes'], ['05-01', 'Dia do Trabalho'], ['09-07', 'Independência'], ['10-12', 'Nossa Senhora Aparecida'],
+    ['11-02', 'Finados'], ['11-15', 'Proclamação da República'], ['11-20', 'Consciência Negra'], ['12-25', 'Natal']];
+  const out = {};
+  for (const [md, nome] of fx) out[`${y}-${md}`] = { nome };
+  out[addDays(pascoa, -48)] = { nome: 'Carnaval', facultativo: true }; out[addDays(pascoa, -47)] = { nome: 'Carnaval', facultativo: true };
+  out[addDays(pascoa, -2)] = { nome: 'Sexta-feira Santa' }; out[addDays(pascoa, 60)] = { nome: 'Corpus Christi', facultativo: true };
+  return (_fer[y] = out);
+}
+const feriado = iso => APP.feriados && iso ? feriadosDoAno(+iso.slice(0, 4))[iso] || null : null;
+const feriadoTxt = f => f.nome + (f.facultativo ? ' (ponto facultativo)' : '');
+function proximosFeriados(dias) {
+  const t = today(), out = [];
+  for (let d = t; d <= addDays(t, dias); d = addDays(d, 1)) { const f = feriado(d); if (f) out.push({ data: d, ...f }); }
+  return out;
+}
+const FERIADO_DIAS = 30;  // com quantos dias de antecedência cria a tarefa
+function syncFeriados() {  // cria a tarefa de avisar/remarcar e conclui sozinha se a sessão sair do feriado
+  if (!APP.feriados || !db) return false;
+  const t = today(), ate = addDays(t, FERIADO_DIAS), vistos = new Set(db.settings.feriadoVistos || []); let mudou = false;
+  for (const s of db.sessions) {
+    if (s.status !== 'agendado' || s.data < t || s.data > ate) continue;
+    const f = feriado(s.data), p = P(s.pacienteId); if (!f || !p) continue;
+    const key = `${s.id}@${s.data}`;
+    if (vistos.has(key) || db.tarefas.some(x => x.feriadoKey === key)) continue;
+    db.tarefas.push({ id: 't' + uid().replace(/-/g, '').slice(0, 10), titulo: `Feriado (${feriadoTxt(f)}) em ${fmtD(s.data).slice(0, 5)}: avisar ou remarcar a sessão${s.hora ? ' das ' + s.hora.replace(':', 'h') : ''}`,
+      prazo: addDays(s.data, -3) < t ? t : addDays(s.data, -3), pacienteId: p.id, obs: '', feita: false, criadaEm: new Date().toISOString(), origem: 'feriado', feriadoKey: key, sessaoId: s.id, feriadoData: s.data });
+    mudou = true;
+  }
+  for (const x of db.tarefas) {
+    if (x.origem !== 'feriado' || x.feita) continue;
+    const s = db.sessions.find(y => y.id === x.sessaoId);
+    if (!s || s.status !== 'agendado' || s.data !== x.feriadoData || x.feriadoData < t) { x.feita = true; x.feitaEm = new Date().toISOString(); x.auto = true; mudou = true; }
+  }
+  return mudou;
 }
 const futureOfSerie = (sid, from) => db.sessions.filter(s => s.serieId === sid && s.status === 'agendado' && s.data >= from);
 function endSerie(p, sr, from) {
@@ -2410,7 +2456,8 @@ function sessTable(list, { showPat = true } = {}) {
   if (!list.length) return '<div class="empty">Nenhum atendimento.</div>';
   return `<div class="tw"><table><thead><tr><th>Data</th>${showPat ? '<th>Paciente</th>' : ''}<th>Situação</th><th class="num">Valor</th><th></th></tr></thead><tbody>${list.map(s => {
     const p = P(s.pacienteId);
-    return `<tr><td>${fmtDW(s.data)}<div class="muted">${[s.hora && esc(s.hora), s.duracao && `${esc(s.duracao)} min`, s.modalidade && esc(s.modalidade)].filter(Boolean).join(' · ')}</div></td>
+    const fe = s.status === 'agendado' && feriado(s.data);
+    return `<tr><td>${fmtDW(s.data)}${fe ? ' ' + badge(fe.nome, 'warn') : ''}<div class="muted">${[s.hora && esc(s.hora), s.duracao && `${esc(s.duracao)} min`, s.modalidade && esc(s.modalidade)].filter(Boolean).join(' · ')}</div></td>
       ${showPat ? `<td><a href="#/p/${p.id}/atendimentos">${esc(p.nome)}</a>${isMinor(p) ? ' ' + badge('menor', 'acc') : ''}</td>` : ''}
       <td>${sBadge(s)}${sessDetail(s)}</td>
       <td class="num">${!porSessao(s) ? '<span class="muted">mensal</span>' : billable(s) || s.status === 'agendado' ? money(s.valor) : `<span class="muted">—</span>`}</td>
@@ -2480,6 +2527,8 @@ function vDashboard() {
   const noGuard = active.filter(p => isMinor(p) && !p.responsaveis.length);
   const noContract = active.filter(p => !hasContract(p));
   const pend = [
+    ...(APP.feriados ? proximosFeriados(15).map(f => { const n = db.sessions.filter(s => s.data === f.data && s.status === 'agendado').length, d = daysUntil(f.data);
+      return `<li>📅 <b>Feriado:</b> ${esc(feriadoTxt(f))} · ${fmtDW(f.data)} <span class="muted">(${d === 0 ? 'hoje' : d === 1 ? 'amanhã' : `em ${d} dias`})</span>${n ? ' · ' + badge(`${n} sessão${n === 1 ? '' : 'ões'} marcada${n === 1 ? '' : 's'}`, 'warn') : ''}</li>`; }) : []),
     ...(APP.encaminhamentos ? encAbertos().map(encLi) : []),
     ...(APP.tarefas ? tarefasAbertas().map(tarefaLi) : []),
     noContract.length && (noContract.length <= 3
@@ -2695,7 +2744,7 @@ function vAgenda() {
     </div><div class="row">${preset('Hoje', t, t)}${preset('Próximos 7 dias', t, addDays(t, 7))}${preset('Próximos 30 dias', t, addDays(t, 30))}${preset('Este mês', m0, addDays(addMonths(m0, 1), -1))}${preset('Mês passado', mPrev, addDays(m0, -1))}</div></div>
     <div class="stats"><div class="stat"><b>${c('agendado')}</b><span>agendadas</span></div><div class="stat"><b>${c('realizado')}</b><span>realizadas</span></div><div class="stat"><b>${c('falta')}</b><span>faltas</span></div><div class="stat"><b>${c('cancelado')}</b><span>cancelamentos</span></div><div class="stat"><b>${c('reagendado')}</b><span>reagendamentos</span></div></div>
     ${ui.agLocal && ui.agLocal !== 'sem' ? agLocalCard(PLAT(ui.agLocal), inRange) : ''}
-    <div class="card">${days.length ? days.map(d => `<div class="day">${fmtDW(d)}${d === t ? ' ' + badge('hoje', 'acc') : ''}</div>${sessTable(list.filter(s => s.data === d))}`).join('') : '<div class="empty">Nenhuma sessão neste período.</div>'}</div>`;
+    <div class="card">${days.length ? days.map(d => `<div class="day">${fmtDW(d)}${d === t ? ' ' + badge('hoje', 'acc') : ''}${feriado(d) ? ' ' + badge('feriado: ' + feriadoTxt(feriado(d)), 'warn') : ''}</div>${sessTable(list.filter(s => s.data === d))}`).join('') : '<div class="empty">Nenhuma sessão neste período.</div>'}</div>`;
 }
 actions['ag-range'] = ({ a, b }) => { ui.agFrom = a; ui.agTo = b; render(); };
 /* resumo dos atendimentos de uma plataforma no período, para enviar a quem indicou os pacientes */
