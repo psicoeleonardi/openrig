@@ -259,7 +259,7 @@ const APP = {
   chave: 'duda',  // prefixo do armazenamento no navegador; cada versão tem o seu
   plataformasPadrao: [  // plataformas que já vêm cadastradas (uma vez só; se excluídas, não voltam)
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
-    { id: 'plrecanto', nome: 'Recanto das Borboletas', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
+    { id: 'plrecanto', nome: 'Recanto das Borboletas', soRealizadas: true, tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
   feriados: true,  // feriados nacionais: lembrete e tarefa para avisar/remarcar quem tem sessão no dia
   nfSimples: true,  // notas fiscais: só marcar, em cada pagamento, se a nota foi emitida
@@ -454,6 +454,9 @@ function migrate(d) {
     const has = n => d.settings.plataformas.some(x => String(x.nome || '').toLowerCase().includes(n.toLowerCase().split(' ')[0]));
     for (const pl of APP.plataformasPadrao) if (!has(pl.nome)) d.settings.plataformas.push(JSON.parse(JSON.stringify(pl)));
   }
+  for (const pl of APP.plataformasPadrao) {  // opções novas das plataformas padrão, uma vez só
+    const x = d.settings.plataformas.find(y => y.id === pl.id); if (x && pl.soRealizadas && x.soRealizadas === undefined) x.soRealizadas = true;
+  }
   if (APP.contas && !d.settings.contasSeed) {  // contas mensais padrão desta versão (uma vez só)
     d.settings.contasSeed = 1;
     for (const c of APP.contas.padrao) if (!d.contas.some(x => x.id === c.id)) {
@@ -488,14 +491,16 @@ function repasseRate(p, valor) {
   return pl.tipo === 'percentual' ? Math.round(num(valor) * num(pl.valor)) / 100 : num(pl.valor);
 }
 const platOf = s => s.plataformaId !== undefined ? s.plataformaId : P(s.pacienteId)?.plataformaId;
-const repasseOf = s => !billable(s) || !platOf(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);  // plataformaId '' = atendimento sem plataforma
+const soRealizadas = s => !!PLAT(platOf(s))?.soRealizadas;  // plataforma que só cobra repasse de sessão realizada (falta cobrada não paga)
+const repasseOf = s => !billable(s) || !platOf(s) || (s.status !== 'realizado' && soRealizadas(s)) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);  // plataformaId '' = atendimento sem plataforma
 function stampRepasse(s, p) { if (s.repasseManual) return s; if (p?.plataformaId) { s.plataformaId = p.plataformaId; s.repasse = repasseRate(p, s.valor); } else { s.plataformaId = ''; delete s.repasse; } return s; }
 function freezePastRepasse(p) { sessOf(p.id).filter(s => s.plataformaId === undefined && s.status !== 'agendado').forEach(s => stampRepasse(s, p)); }  // antes de mudar a regra, fixa a dos atendimentos já feitos
 const semRepasse = p => !p.plataformaId ? [] : sessOf(p.id).filter(s => s.status !== 'agendado' && !s.repasseManual && (s.plataformaId || '') !== p.plataformaId);
 function refreshFutureRepasse(p) { sessOf(p.id).filter(s => s.status === 'agendado' && s.data >= today()).forEach(s => stampRepasse(s, p)); }
 const pct = v => `${String(num(v)).replace('.', ',')}%`;
 function faixaTxt(f) { return num(f.valor) === 0 ? 'não cobra' : f.tipo === 'percentual' ? pct(f.valor) : money(f.valor); }
-function platRegra(pl) {
+const platRegra = pl => platRegra0(pl) + (pl.soRealizadas ? ' · só sessões realizadas' : '');
+function platRegra0(pl) {
   if (pl.tipo === 'faixas') {
     const fs = (pl.faixas || []).slice().sort((a, b) => num(a.de) - num(b.de));
     if (!fs.length) return 'faixas não definidas';
@@ -1418,6 +1423,7 @@ const platFields = () => [
   { k: 'tipo', l: 'Como cobra', t: 'select', opts: [['fixo', 'Valor fixo por atendimento'], ['percentual', 'Percentual do valor da sessão'], ['faixas', 'Por faixa de valor da sessão']] },
   { k: 'valor', l: 'Valor (R$) ou percentual (%)', t: 'money' },
   { k: 'faixas', l: 'Faixas', t: 'faixas', hint: 'Cada linha vale a partir do valor indicado até a próxima linha. Use valor 0 para “não cobra”. Ex.: a partir de 0 → 0%; a partir de 40 → 10%; a partir de 60 → 15%.' },
+  { k: 'soRealizadas', l: 'Repasse só de sessão realizada (faltas e cancelamentos não pagam repasse, mesmo quando cobrados do paciente)', t: 'checkbox' },
   { k: 'contato', l: 'Contato / forma de pagar o repasse', w: 'full', ph: 'Ex.: Pix fin@plataforma.com, até o dia 10' },
   { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
 ];
@@ -2749,7 +2755,7 @@ function vAgenda() {
 actions['ag-range'] = ({ a, b }) => { ui.agFrom = a; ui.agTo = b; render(); };
 /* resumo dos atendimentos de uma plataforma no período, para enviar a quem indicou os pacientes */
 function agLocalTexto(pl, ss) {
-  const feitos = ss.filter(billable), por = new Map();
+  const feitos = ss.filter(s => pl.soRealizadas ? s.status === 'realizado' : billable(s)), por = new Map();
   for (const x of feitos) { const nm = P(x.pacienteId)?.nome || 'Paciente'; por.set(nm, (por.get(nm) || 0) + 1); }
   const faltas = feitos.filter(x => x.status !== 'realizado').length;
   return [`Atendimentos - ${pl.nome}`, `Período: ${fmtD(ui.agFrom)} a ${fmtD(ui.agTo)}`, '',
@@ -2758,9 +2764,9 @@ function agLocalTexto(pl, ss) {
     '', `Repasse: ${money(sum(feitos, repasseOf))}`].join('\n');
 }
 function agLocalCard(pl, ss) {
-  const feitos = ss.filter(billable), txt = agLocalTexto(pl, ss);
+  const feitos = ss.filter(s => pl.soRealizadas ? s.status === 'realizado' : billable(s)), txt = agLocalTexto(pl, ss);
   return `<div class="card"><div class="head" style="margin-bottom:8px"><div><h2 style="margin:0">${esc(pl.nome)}: ${feitos.length} atendimento${feitos.length === 1 ? '' : 's'} feito${feitos.length === 1 ? '' : 's'}</h2>
-      <div class="muted">${fmtD(ui.agFrom)} a ${fmtD(ui.agTo)} · realizados e faltas/cancelamentos cobrados · repasse ${money(sum(feitos, repasseOf))}</div></div>
+      <div class="muted">${fmtD(ui.agFrom)} a ${fmtD(ui.agTo)} · ${pl.soRealizadas ? 'só sessões realizadas' : 'realizados e faltas/cancelamentos cobrados'} · repasse ${money(sum(feitos, repasseOf))}</div></div>
       <div class="actions"><button class="btn sm" data-act="ag-copiar">Copiar resumo</button><a class="btn sm primary" href="https://wa.me/?text=${encodeURIComponent(txt)}" target="_blank" rel="noopener">Enviar pelo WhatsApp</a></div></div>
     <div class="pre muted" style="font-size:.88rem">${esc(txt)}</div></div>`;
 }
