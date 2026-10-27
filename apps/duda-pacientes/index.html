@@ -1102,10 +1102,10 @@ function readForm(form, fields) {
   }
   return o;
 }
-function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 'Salvar', onRender }) {
+function openForm({ title, fields, values = {}, onSave, intro = '', saveLabel = 'Salvar', closeLabel = 'Cancelar', onRender }) {
   const dlg = $('#dlg');
   dlg.innerHTML = `<form class="dlg" novalidate><h2>${esc(title)}</h2>${intro}<div class="grid">${fields.map(f => fieldHTML(f, values[f.k])).join('')}</div>
-    <div class="foot"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">${esc(saveLabel)}</button></div></form>`;
+    <div class="foot"><button type="button" class="btn" data-close>${esc(closeLabel)}</button><button class="btn primary">${esc(saveLabel)}</button></div></form>`;
   const form = $('form', dlg);
   $('[data-close]', form).onclick = () => dlg.close();
   form.onsubmit = async e => {
@@ -1900,7 +1900,7 @@ actions['del-session'] = async ({ id }) => { if (!(await ask({ title: 'Excluir e
 actions['sess-done'] = async ({ id }) => { S(id).status = 'realizado'; await commit('Marcada como realizada.'); };
 actions['sess-miss'] = ({ id }) => {
   const s = S(id), p = P(s.pacienteId);
-  openForm({ title: 'Registrar falta', fields: [
+  openForm({ title: 'Registrar falta', saveLabel: 'Registrar falta', closeLabel: 'Voltar', fields: [
     { k: 'aviso', l: 'Tipo de falta', t: 'select', opts: ['Sem aviso', 'Avisou com pouca antecedência', 'Justificada (saúde, etc.)'] },
     { k: 'motivo', l: 'Motivo / observação', w: 'full' },
     { k: 'cobrar', l: 'Cobrar esta sessão', t: 'checkbox' }],
@@ -1909,7 +1909,7 @@ actions['sess-miss'] = ({ id }) => {
 };
 actions['sess-cancel'] = ({ id }) => {
   const s = S(id);
-  openForm({ title: 'Cancelar sessão', fields: [
+  openForm({ title: 'Cancelar sessão', saveLabel: 'Confirmar cancelamento', closeLabel: 'Voltar', fields: [
     { k: 'por', l: 'Cancelado por', t: 'select', opts: ['Paciente / responsável', 'Profissional', 'Feriado / recesso', 'Outro'] },
     { k: 'motivo', l: 'Motivo', w: 'full' },
     { k: 'cobrar', l: 'Cobrar esta sessão (cancelamento fora do prazo combinado)', t: 'checkbox' }],
@@ -1917,7 +1917,7 @@ actions['sess-cancel'] = ({ id }) => {
 };
 actions['sess-resched'] = ({ id }) => {
   const s = S(id);
-  openForm({ title: 'Reagendar sessão', intro: `<p class="muted">Original: ${fmtDW(s.data)} ${esc(s.hora || '')}. A sessão original fica no histórico como “reagendada” e uma nova é criada.</p>`,
+  openForm({ title: 'Reagendar sessão', saveLabel: 'Reagendar', closeLabel: 'Voltar', intro: `<p class="muted">Original: ${fmtDW(s.data)} ${esc(s.hora || '')}. A sessão original fica no histórico como “reagendada” e uma nova é criada.</p>`,
     fields: [{ k: 'data', l: 'Nova data', t: 'date', req: true }, { k: 'hora', l: 'Novo horário', t: 'time' },
       { k: 'por', l: 'Solicitado por', t: 'select', opts: ['Paciente / responsável', 'Profissional'] }, { k: 'motivo', l: 'Motivo', w: 'full' }],
     values: { data: addDays(s.data, 1), hora: s.hora },
@@ -2426,7 +2426,7 @@ function sessActs(s) {
   const quick = s.status === 'agendado' ? `<button class="btn sm" data-act="sess-done" data-id="${s.id}" title="Marcar como realizada">✓ Realizada</button> ` : '';
   return quick + menu([
     s.status === 'agendado' && ['sess-miss', 'Registrar falta', { id: s.id }],
-    s.status === 'agendado' && ['sess-cancel', 'Cancelar', { id: s.id }],
+    s.status === 'agendado' && ['sess-cancel', 'Cancelar sessão', { id: s.id }],
     s.status === 'agendado' && ['sess-resched', 'Reagendar', { id: s.id }],
     (s.status === 'realizado' || s.status === 'falta') && ['new-record', 'Escrever no prontuário', { pid: s.pacienteId, sess: s.id }],
     ...sessOnlineItems(s),
