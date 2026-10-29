@@ -230,6 +230,7 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
       <a href="#/pacientes" data-page="pacientes">Pacientes</a>
       <a href="#/agenda" data-page="agenda">Agenda</a>
       <a href="#/financeiro" data-page="financeiro">Financeiro</a>
+      <a href="#/analises" data-page="analises" id="navAnalises" hidden>Análises</a>
       <a href="#/contatos" data-page="contatos">Contatos</a>
       <a href="#/config" data-page="config">Configurações</a>
     </nav>
@@ -261,6 +262,7 @@ const APP = {
     { id: 'plsameca', nome: 'Sameca', tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 0 }, { de: 40, tipo: 'percentual', valor: 10 }, { de: 60, tipo: 'percentual', valor: 15 }] },
     { id: 'plrecanto', nome: 'Recanto das Borboletas', soRealizadas: true, tipo: 'faixas', valor: '', faixas: [{ de: 0, tipo: 'fixo', valor: 25 }, { de: 100, tipo: 'fixo', valor: 30 }] },
   ],
+  analises: true,  // aba Análises (faltas, cancelamentos, comparecimento, evolução dos meses)
   feriados: true,  // feriados nacionais: lembrete e tarefa para avisar/remarcar quem tem sessão no dia
   nfSimples: true,  // notas fiscais: só marcar, em cada pagamento, se a nota foi emitida
   cobranca: true,  // botão "Cobrar" com mensagem do valor em aberto (WhatsApp)
@@ -285,7 +287,7 @@ const AUTOLOCK_MIN = 15;
 const NFSE_NACIONAL = 'https://www.nfse.gov.br/EmissorNacional';
 
 let db = null, key = null, salt = null;
-const ui = { pq: '', pstatus: 'ativo', agFrom: '', agTo: '', agStatus: '', agLocal: '', finMonth: '' };
+const ui = { pq: '', pstatus: 'ativo', agFrom: '', agTo: '', agStatus: '', agLocal: '', anMonth: '', finMonth: '' };
 
 /* ---------- utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -2852,6 +2854,56 @@ function vFinance() {
     <div class="card"><h2>Saldos por paciente</h2>${bals.length ? `<div class="tw"><table><thead><tr><th>Paciente</th><th class="num">Cobrável</th><th class="num">Pago</th><th class="num">Saldo</th><th></th></tr></thead><tbody>${bals.map(x => `<tr><td><a href="#/p/${x.p.id}/financeiro">${esc(x.p.nome)}</a></td><td class="num">${money(x.due)}</td><td class="num">${money(x.paid)}</td><td class="num">${x.bal > 0 ? `<b style="color:var(--warn)">${money(x.bal)}</b>` : `<span class="muted">crédito ${money(-x.bal)}</span>`}</td><td class="acts">${x.bal > 0 ? `${APP.cobranca ? `<button class="btn sm" data-act="cobrar" data-pid="${x.p.id}">Cobrar</button>` : ''}<button class="btn sm" data-act="new-payment" data-pid="${x.p.id}">Receber</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Todos os pacientes estão em dia.</div>'}</div>`;
 }
 
+/* análises: quanto se perdeu com faltas/cancelamentos não cobrados, comparecimento e evolução dos meses */
+const quemCancelou = s => /^Profissional|^Feriado/.test(s.motivo || '') ? 'voce' : 'paciente';
+function analiseMes(ym) {
+  const ss = db.sessions.filter(s => s.data.startsWith(ym)), feitas = ss.filter(s => s.status === 'realizado');
+  const avulsa = s => porSessao(s);  // mensalidade: falta não muda o valor do mês, então não é perda
+  const naoCobradas = ss.filter(s => (s.status === 'falta' || s.status === 'cancelado') && !s.cobrar), perdas = naoCobradas.filter(avulsa);
+  const valorPerdido = s => avulsa(s) ? num(s.valor) : 0;
+  // repasse que não seria pago se a sessão tivesse acontecido (para o valor líquido perdido)
+  const repEvitado = s => avulsa(s) && platOf(s) ? (hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor)) : 0;
+  const grupo = l => ({ n: l.length, valor: sum(l, valorPerdido), liquido: sum(l, s => valorPerdido(s) - repEvitado(s)) });
+  const faltas = perdas.filter(s => s.status === 'falta'), canc = perdas.filter(s => s.status === 'cancelado');
+  const cobradas = ss.filter(s => (s.status === 'falta' || s.status === 'cancelado') && s.cobrar);
+  const porPac = new Map();
+  for (const s of perdas) { const k = s.pacienteId, x = porPac.get(k) || { p: P(k), n: 0, valor: 0 }; x.n++; x.valor += valorPerdido(s); porPac.set(k, x); }
+  const base = feitas.length + ss.filter(s => s.status === 'falta' || s.status === 'cancelado').length;
+  return { ym, feitas: feitas.length, faltas: grupo(faltas), canc: grupo(canc), cancPac: grupo(canc.filter(s => quemCancelou(s) === 'paciente')), cancVoce: grupo(canc.filter(s => quemCancelou(s) === 'voce')),
+    perdido: grupo(perdas), cobradas: { n: cobradas.length, valor: sum(cobradas, s => porSessao(s) ? num(s.valor) : 0) }, mensalSemPerda: naoCobradas.filter(s => !avulsa(s)).length,
+    base, reag: ss.filter(s => s.status === 'reagendado').length, comparecimento: base ? feitas.length / base : null,
+    porPac: [...porPac.values()].sort((a, b) => b.valor - a.valor || b.n - a.n), recebido: sum(db.payments.filter(x => (x.data || '').startsWith(ym)), x => x.valor), cobrado: cobradoNoMes(ym) };
+}
+function vAnalises() {
+  const ym = ui.anMonth || today().slice(0, 7), a = analiseMes(ym), ant = analiseMes(ymAdd(ym, -1)), mes = MONTHS[Number(ym.slice(5)) - 1];
+  const pct = v => v == null ? '—' : `${Math.round(v * 100)}%`;
+  const comp = (v, w, menorMelhor = true) => { if (!w && !v) return ''; const d = v - w; if (Math.abs(d) < 0.005) return '<div class="muted">igual ao mês anterior</div>';
+    const bom = menorMelhor ? d < 0 : d > 0; return `<div style="font-size:.8rem;color:var(--${bom ? 'ok' : 'bad'})">${d > 0 ? '▲' : '▼'} ${money(Math.abs(d))} vs. ${MONTHS[Number(ant.ym.slice(5)) - 1]}</div>`; };
+  const linha = (rot, g, det = '') => `<tr><td><b>${rot}</b>${det ? `<div class="muted">${det}</div>` : ''}</td><td class="num">${g.n}</td><td class="num">${money(g.valor)}</td></tr>`;
+  const meses = Array.from({ length: 6 }, (_, i) => analiseMes(ymAdd(ym, i - 5)));
+  return `<div class="head"><div><h1>Análises</h1><div class="muted">Faltas, cancelamentos e comparecimento, mês a mês.</div></div>
+    <label class="fld" style="flex:0 1 200px"><span>Mês</span><input type="month" data-ui="anMonth" value="${ym}"></label></div>
+    <div class="stats">
+      <div class="stat ${a.perdido.valor > 0 ? 'bad' : ''}"><b>${money(a.perdido.valor)}</b><span>perdido com faltas e cancelamentos não cobrados em ${mes}</span>${comp(a.perdido.valor, ant.perdido.valor)}</div>
+      <div class="stat"><b>${money(a.perdido.liquido)}</b><span>perda líquida (descontando o repasse que não foi pago)</span></div>
+      <div class="stat"><b>${pct(a.comparecimento)}</b><span>comparecimento (${a.feitas} realizada${a.feitas === 1 ? '' : 's'} de ${a.base} marcadas)</span></div>
+      <div class="stat"><b>${money(a.cobradas.valor)}</b><span>faltas/cancelamentos cobrados (${a.cobradas.n}) · não se perdeu</span></div>
+    </div>
+    <div class="cols">
+      <div class="card"><h2>O que foi perdido em ${esc(mes)}</h2><div class="tw"><table><thead><tr><th></th><th class="num">Sessões</th><th class="num">Valor</th></tr></thead><tbody>
+        ${linha('Faltas não cobradas', a.faltas)}
+        ${linha('Cancelamentos pelo paciente', a.cancPac, 'não cobrados')}
+        ${linha('Cancelamentos por você', a.cancVoce, 'profissional, feriado ou recesso')}
+        <tr><td><b>Total</b></td><td class="num"><b>${a.perdido.n}</b></td><td class="num"><b>${money(a.perdido.valor)}</b></td></tr></tbody></table></div>
+        ${a.mensalSemPerda ? `<p class="muted" style="margin:8px 0 0">${a.mensalSemPerda} falta(s)/cancelamento(s) de pacientes de mensalidade não entram: o valor do mês é fixo.</p>` : ''}
+        ${a.reag ? `<p class="muted" style="margin:8px 0 0">${a.reag} reagendamento(s) no mês (não contam como perda).</p>` : ''}</div>
+      <div class="card"><h2>Por paciente</h2>${a.porPac.length ? `<div class="tw"><table><tbody>${a.porPac.map(x => `<tr><td><a href="#/p/${x.p?.id}/atendimentos">${esc(x.p?.nome || '—')}</a></td><td class="num">${x.n} ${x.n === 1 ? 'sessão' : 'sessões'}</td><td class="num">${money(x.valor)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhuma falta ou cancelamento não cobrado neste mês. 🌿</div>'}</div>
+    </div>
+    <div class="card"><h2>Últimos 6 meses</h2><div class="tw"><table><thead><tr><th>Mês</th><th class="num">Realizadas</th><th class="num">Faltas</th><th class="num">Cancel.</th><th class="num">Comparec.</th><th class="num">Perdido</th><th class="num">Cobrado</th><th class="num">Recebido</th></tr></thead><tbody>
+      ${meses.map(m => `<tr${m.ym === ym ? ' style="font-weight:600"' : ''}><td>${esc(MONTHS[Number(m.ym.slice(5)) - 1])}/${m.ym.slice(2, 4)}</td><td class="num">${m.feitas}</td><td class="num">${m.faltas.n}</td><td class="num">${m.canc.n}</td><td class="num">${pct(m.comparecimento)}</td><td class="num">${m.perdido.valor ? `<span style="color:var(--bad)">${money(m.perdido.valor)}</span>` : money(0)}</td><td class="num">${money(m.cobrado)}</td><td class="num">${money(m.recebido)}</td></tr>`).join('')}
+    </tbody></table></div><p class="muted" style="margin:8px 0 0">Faltas e cancelamentos aqui são só os não cobrados. “Cobrado” é o valor das sessões e mensalidades do mês.</p></div>`;
+}
+
 function vContacts() {
   const list = db.patients.filter(needsContact).map(p => ({ p, ...contactInfo(p) })).sort((a, b) => a.next.localeCompare(b.next));
   return `<div class="head"><div><h1>Contatos com responsáveis</h1><div class="muted">Pacientes menores de idade ativos — um contato a cada mês.</div></div></div>
@@ -2905,7 +2957,8 @@ function render() {
   const r = route();
   listRenderer = null;
   const nt = $('#navTarefas'); if (nt) { nt.hidden = !APP.tarefas; const n = (db.tarefas || []).filter(t => !t.feita).length; nt.textContent = n ? `Tarefas (${n})` : 'Tarefas'; }
-  const views = { tarefas: APP.tarefas ? vTarefas : vDashboard, inicio: vDashboard, pacientes: vPatients, p: vPatient, agenda: vAgenda, financeiro: vFinance, contatos: vContacts, config: vConfig };
+  const na = $('#navAnalises'); if (na) na.hidden = !APP.analises;
+  const views = { analises: APP.analises ? vAnalises : vDashboard, tarefas: APP.tarefas ? vTarefas : vDashboard, inicio: vDashboard, pacientes: vPatients, p: vPatient, agenda: vAgenda, financeiro: vFinance, contatos: vContacts, config: vConfig };
   const active = document.activeElement, focusKey = active?.dataset?.ui, selStart = active?.selectionStart;
   $('#main').innerHTML = (views[r.page] || vDashboard)(r);
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (r.page === 'p' ? 'pacientes' : r.page)));
