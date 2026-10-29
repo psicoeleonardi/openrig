@@ -446,7 +446,7 @@ function emptyDB() {
   return { v: 1, patients: [], sessions: [], payments: [], invoices: [], contacts: [], records: [], settings: {} };
 }
 function migrate(d) {
-  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas', 'tarefas', 'encaminhamentos']) if (!Array.isArray(d[k])) d[k] = [];
+  for (const k of ['patients', 'sessions', 'payments', 'invoices', 'contacts', 'records', 'repassesPagos', 'contas', 'contasPagas', 'tarefas', 'encaminhamentos', 'gastos']) if (!Array.isArray(d[k])) d[k] = [];
   d.settings = Object.assign({ nome: '', crp: '', cpf: '', telefone: '', email: '', endereco: '', cidade: '', valorPadrao: '', duracaoPadrao: 50, descricaoNF: 'Serviços de psicologia (psicoterapia)', linkNF: NFSE_NACIONAL, gcalPrefixo: 'Sessão', gcalTitulo: 'iniciais', backupDias: 7, ultimoBackup: '', backupAdiado: '' }, d.settings || {});
   if (!Array.isArray(d.settings.plataformas)) d.settings.plataformas = [];
   if (!d.settings.platSeed) {  // plataformas padrão desta versão (uma vez só; se excluídas, não voltam)
@@ -668,14 +668,14 @@ let cloudTimer = null, cloudBusy = false, cloudSeen = 0, legacyCleanup = false, 
 const PART_KEYS = ['sessions', 'payments', 'invoices', 'contacts', 'records'];
 const partId = pid => 'p-' + String(pid).replace(/[^A-Za-z0-9_-]/g, '_');
 function splitDB(d) {
-  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas, tarefas: d.tarefas, encaminhamentos: d.encaminhamentos } }, by = {};
+  const parts = { core: { v: d.v, settings: d.settings, atualizadoEm: d.atualizadoEm, repassesPagos: d.repassesPagos, contas: d.contas, contasPagas: d.contasPagas, tarefas: d.tarefas, encaminhamentos: d.encaminhamentos, gastos: d.gastos } }, by = {};
   for (const p of d.patients) by[p.id] = parts[partId(p.id)] = { patient: p, sessions: [], payments: [], invoices: [], contacts: [], records: [] };
   for (const k of PART_KEYS) for (const r of d[k]) by[r.pacienteId]?.[k].push(r);
   return parts;
 }
 function joinDB(parts) {
   const d = emptyDB(), c = parts.core || {};
-  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || []; d.tarefas = c.tarefas || []; d.encaminhamentos = c.encaminhamentos || [];
+  d.settings = c.settings || {}; d.atualizadoEm = c.atualizadoEm; d.repassesPagos = c.repassesPagos || []; d.contas = c.contas || []; d.contasPagas = c.contasPagas || []; d.tarefas = c.tarefas || []; d.encaminhamentos = c.encaminhamentos || []; d.gastos = c.gastos || [];
   for (const [id, x] of Object.entries(parts)) {
     if (id === 'core' || !x?.patient) continue;
     d.patients.push(x.patient);
@@ -1547,17 +1547,46 @@ function contaRow(x, { mostrarMes = false } = {}) {
 function totalContas() {  // em aberto: atrasadas do mês passado + as deste mês, sem as marcadas "fora do total"
   const ym = today().slice(0, 7);
   const ab = [...contasDoMes(ymAdd(ym, -1)), ...contasDoMes(ym)].filter(x => x.aberta && !x.c.foraDoTotal);
-  return { valor: sum(ab, x => x.previsto), aInformar: ab.filter(x => !x.previsto).length, atrasadas: ab.filter(x => x.dias < 0).length, n: ab.length, ref: ymAdd(ym, -1) };
+  const ga = [...gastosAbertos(ymAdd(ym, -1)), ...gastosAbertos(ym)];
+  return { valor: sum(ab, x => x.previsto) + sum(ga, g => g.valor), aInformar: ab.filter(x => !x.previsto).length, atrasadas: ab.filter(x => x.dias < 0).length, n: ab.length + ga.length, ref: ymAdd(ym, -1) };
 }
 function contasCard() {  // tela inicial: atrasadas do mês passado, as deste mês e, a partir do dia 25, as do próximo
   if (!APP.contas || !db.contas.length) return '';
   const ym = today().slice(0, 7), atras = contasDoMes(ymAdd(ym, -1)).filter(x => x.aberta), atual = contasDoMes(ym);
   const prox = Number(today().slice(8)) >= 25 ? contasDoMes(ymAdd(ym, 1)) : [];
-  const abertoMes = sum(atual.filter(x => x.aberta && !x.c.foraDoTotal), x => x.previsto), fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome);
-  return `<div class="card"><div class="head" style="margin-bottom:6px"><h2 style="margin:0">Contas do mês</h2><a class="muted" href="#/financeiro">ver todas</a></div>
-    <p class="muted" style="margin:0 0 6px">${atual.filter(x => x.aberta).length ? `Vencem em ${esc(MONTHS[Number(ym.slice(5)) - 1])}, referentes a ${esc(MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1])}. Falta pagar: <b>${money(abertoMes)}</b>${atual.some(x => x.aberta && !x.previsto && !x.c.foraDoTotal) ? ' + valores a informar' : ''}${fora.length ? ` (sem ${esc(fora.join(', ').toLowerCase())})` : ''}` : 'Tudo pago neste mês.'}</p>
-    <div class="tw"><table><tbody>${[...atras.map(x => contaRow(x, { mostrarMes: true })), ...atual.map(x => contaRow(x))].join('')}</tbody></table></div>
+  const abertoMes = sum(atual.filter(x => x.aberta && !x.c.foraDoTotal), x => x.previsto) + sum(gastosAbertos(ym), g => g.valor), fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome);
+  return `<div class="card"><div class="head" style="margin-bottom:6px"><h2 style="margin:0">Contas do mês</h2><div class="row"><button class="btn sm" data-act="new-gasto">+ Gasto avulso</button><a class="muted" href="#/financeiro">ver todas</a></div></div>
+    <p class="muted" style="margin:0 0 6px">${atual.filter(x => x.aberta).length || gastosAbertos(ym).length ? `Vencem em ${esc(MONTHS[Number(ym.slice(5)) - 1])}, referentes a ${esc(MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1])}. Falta pagar: <b>${money(abertoMes)}</b>${atual.some(x => x.aberta && !x.previsto && !x.c.foraDoTotal) ? ' + valores a informar' : ''}${fora.length ? ` (sem ${esc(fora.join(', ').toLowerCase())})` : ''}` : 'Tudo pago neste mês.'}</p>
+    <div class="tw"><table><tbody>${[...atras.map(x => contaRow(x, { mostrarMes: true })), ...atual.map(x => contaRow(x)), ...[...gastosAbertos(ymAdd(ym, -1)), ...gastosDoMes(ym)].map(gastoRow)].join('')}</tbody></table></div>
     ${prox.length ? `<h3 style="margin:12px 0 4px">Próximo mês · ${esc(fmtMonth(ymAdd(ym, 1)))}</h3><div class="tw"><table><tbody>${prox.map(x => contaRow(x)).join('')}</tbody></table></div>` : ''}</div>`;
+}
+/* gastos avulsos: despesas da clínica que acontecem uma vez só (identidade visual, curso, equipamento…) */
+const gastosDoMes = ym => (db.gastos || []).filter(g => (g.data || '').startsWith(ym)).sort((a, b) => (a.data || '').localeCompare(b.data || ''));
+const gastosAbertos = ym => gastosDoMes(ym).filter(g => !g.pago);
+const gastoFields = () => [
+  { k: 'descricao', l: 'Descrição', req: true, w: 'full', ph: 'Ex.: identidade visual' },
+  { k: 'valor', l: 'Valor (R$)', t: 'money', req: true }, { k: 'data', l: 'Data', t: 'date', req: true, hint: 'O gasto conta no mês desta data.' },
+  { k: 'pago', l: 'Já está pago', t: 'checkbox' }, { k: 'forma', l: 'Forma de pagamento', t: 'select', empty: true, opts: PAY_FORMS },
+  { k: 'obs', l: 'Observações', t: 'textarea', rows: 2 },
+];
+const GASTO = id => (db.gastos || []).find(g => g.id === id);
+actions['new-gasto'] = () => openForm({ title: 'Gasto avulso (só uma vez)', fields: gastoFields(), saveLabel: 'Salvar gasto', values: { data: today(), pago: true, forma: 'Pix' },
+  intro: '<p class="muted" style="margin-top:0">Para despesas que não se repetem todo mês. Contas mensais ficam em “+ Conta”.</p>',
+  onSave: async v => { if (!num(v.valor)) { notice('Informe o valor.'); return false; } v.valor = num(v.valor); db.gastos.push({ id: 'g' + uid().replace(/-/g, '').slice(0, 10), ...v, dataPago: v.pago ? v.data : '' }); await commit('Gasto registrado.'); } });
+actions['edit-gasto'] = ({ id }) => { const g = GASTO(id); openForm({ title: 'Editar gasto', fields: gastoFields(), values: g, onSave: async v => { v.valor = num(v.valor); if (v.pago && !g.pago) v.dataPago = today(); Object.assign(g, v); await commit('Gasto atualizado.'); } }); };
+actions['del-gasto'] = async ({ id }) => { const g = GASTO(id); if (!(await ask({ title: 'Excluir este gasto?', text: `${g.descricao} — ${money(g.valor)}`, ok: 'Excluir', danger: true }))) return; db.gastos = db.gastos.filter(x => x !== g); await commit('Gasto excluído.'); };
+actions['pay-gasto'] = async ({ id }) => { const g = GASTO(id); Object.assign(g, { pago: true, dataPago: today() }); await commit('Gasto marcado como pago.'); };
+function gastoRow(g) {
+  return `<tr><td><b>${esc(g.descricao)}</b><div class="muted">${fmtD(g.data)}${g.forma ? ' · ' + esc(g.forma) : ''} · gasto avulso</div>${g.obs ? `<div class="muted pre">${esc(g.obs)}</div>` : ''}</td>
+    <td class="num">${money(g.valor)}</td><td>${g.pago ? badge('pago', 'ok') : badge('a pagar', 'warn')}</td>
+    <td class="acts">${g.pago ? '' : `<button class="btn sm" data-act="pay-gasto" data-id="${g.id}">Pagar</button>`}${menu([['edit-gasto', 'Editar', { id: g.id }], ['del-gasto', 'Excluir', { id: g.id }, 'danger']])}</td></tr>`;
+}
+function gastosCard(month) {
+  const l = gastosDoMes(month);
+  return `<div class="card"><div class="head" style="margin-bottom:8px"><h2 style="margin:0">Gastos avulsos · ${esc(fmtMonth(month))}</h2><button class="btn sm primary" data-act="new-gasto">+ Gasto avulso</button></div>
+    ${l.length ? `<p class="muted" style="margin:0 0 6px">Total no mês: <b>${money(sum(l, g => g.valor))}</b>${l.some(g => !g.pago) ? ` · falta pagar: <b>${money(sum(l.filter(g => !g.pago), g => g.valor))}</b>` : ''}</p>
+      <div class="tw"><table><tbody>${l.map(gastoRow).join('')}</tbody></table></div>`
+      : '<p class="muted" style="margin:0">Nenhum gasto avulso neste mês. Use para despesas que acontecem uma vez só (identidade visual, curso, equipamento…).</p>'}</div>`;
 }
 function contasFinCard(month) {
   if (!APP.contas) return '';
@@ -1578,8 +1607,8 @@ function formaTags(pays) {
 }
 const dinPixTags = (din, pix) => `<div class="row" style="gap:4px;margin-top:6px">${badge(`Dinheiro: ${money(din)}`, 'info')}${badge(`Pix: ${money(pix)}`, 'info')}</div>`;
 function contasStat(ym) {  // total das contas do mês (sem as "fora do total", como o salário)
-  const l = contasDoMes(ym).filter(x => !x.c.foraDoTotal), ab = l.filter(x => x.aberta), n = ab.filter(x => !x.previsto).length;
-  return `<div class="stat ${ab.some(x => x.dias < 0) ? 'bad' : ab.length ? 'warn' : ''}"><b>${money(sum(ab, x => x.previsto))}</b><span>contas a pagar em ${MONTHS[Number(ym.slice(5)) - 1]} (ref. ${MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1]})${n ? ` + ${n} a informar` : ''}</span></div>`;
+  const l = contasDoMes(ym).filter(x => !x.c.foraDoTotal), ab = l.filter(x => x.aberta), n = ab.filter(x => !x.previsto).length, ga = gastosAbertos(ym);
+  return `<div class="stat ${ab.some(x => x.dias < 0) ? 'bad' : ab.length || ga.length ? 'warn' : ''}"><b>${money(sum(ab, x => x.previsto) + sum(ga, g => g.valor))}</b><span>contas a pagar em ${MONTHS[Number(ym.slice(5)) - 1]} (ref. ${MONTHS[Number(ymAdd(ym, -1).slice(5)) - 1]})${n ? ` + ${n} a informar` : ''}</span></div>`;
 }
 /* previsão do mês: ganhos (sessões feitas + agendadas até o fim do mês) − repasse dessas mesmas sessões
    − contas do mês (sem salário e sem as de repasse, que já estão no repasse previsto) = sobra */
@@ -1593,9 +1622,9 @@ function previsaoMes(ym) {
   const repDe = s => billable(s) ? repasseOf(s) : s.status !== 'agendado' || !platOf(s) ? 0 : hasVal(s.repasse) ? num(s.repasse) : repasseRate(P(s.pacienteId), s.valor);
   const reps = (db.settings.plataformas || []).map(pl => ({ pl, v: sum(db.sessions.filter(s => s.data.startsWith(ym) && platOf(s) === pl.id), repDe) })).filter(r => r.v > 0.005);
   const cs = APP.contas ? contasDoMes(ym).filter(x => !x.c.foraDoTotal && !x.pl) : [];
-  const contas = sum(cs, x => x.pago ? x.pago.valor : x.previsto);
+  const gs = gastosDoMes(ym), contas = sum(cs, x => x.pago ? x.pago.valor : x.previsto) + sum(gs, g => g.valor);
   const fora = db.contas.filter(c => c.foraDoTotal && c.ativa !== false).map(c => c.nome.toLowerCase());
-  return { ganhos, reps, repasse: sum(reps, r => r.v), contas, nContas: cs.length, aInformar: cs.filter(x => !x.pago && !x.previsto).length, fora };
+  return { ganhos, reps, repasse: sum(reps, r => r.v), contas, nGastos: gs.length, nContas: cs.length, aInformar: cs.filter(x => !x.pago && !x.previsto).length, fora };
 }
 function previsaoCard(ym) {
   if (!APP.previsao) return '';
@@ -1604,7 +1633,7 @@ function previsaoCard(ym) {
   return `<div class="card"><h2>Previsão de ${esc(mes)}</h2><div class="tw"><table><tbody>
     ${linha('Ganhos previstos', money(v.ganhos), `sessões de ${esc(mes)} já feitas e agendadas até o fim do mês`, 'ok')}
     ${linha('Repasse previsto', '− ' + money(v.repasse), v.reps.length ? `${v.reps.map(r => `${esc(r.pl.nome)}: ${money(r.v)}`).join(' · ')} (sessões feitas e agendadas)` : 'nenhuma sessão de plataforma no mês', 'warn')}
-    ${APP.contas ? linha('Contas previstas', '− ' + money(v.contas), `contas que vencem em ${esc(mes)}${v.fora.length ? `, sem ${esc(v.fora.join(', '))}` : ''}${v.aInformar ? ` · ${v.aInformar} ainda sem valor` : ''}`, 'bad') : ''}
+    ${APP.contas ? linha('Contas previstas', '− ' + money(v.contas), `contas que vencem em ${esc(mes)}${v.nGastos ? ` + ${v.nGastos} gasto${v.nGastos === 1 ? '' : 's'} avulso${v.nGastos === 1 ? '' : 's'}` : ''}${v.fora.length ? `, sem ${esc(v.fora.join(', '))}` : ''}${v.aInformar ? ` · ${v.aInformar} ainda sem valor` : ''}`, 'bad') : ''}
     ${linha('Sobra prevista', money(sobra), v.aInformar ? 'falta informar o valor de algumas contas' : '', sobra < 0 ? 'bad' : '')}
   </tbody></table></div></div>`;
 }
@@ -2815,6 +2844,7 @@ function vFinance() {
       })()}${APP.contas && db.contas.length ? contasStat(month) : ''}</div></div>
     ${previsaoCard(month)}
     ${contasFinCard(month)}
+    ${APP.contas ? gastosCard(month) : ''}
     ${platCard(reps, repPagosMes, month)}
     <div class="card"><h2>Pagamentos de ${fmtMonth(month)}</h2>${payTable(pays)}</div>
     ${APP.nfSimples ? '' : `<div class="card"><h2>Notas fiscais (emitidas no mês e pendentes)</h2>${invTable(invs)}</div>`}
